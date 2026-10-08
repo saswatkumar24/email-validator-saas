@@ -1,0 +1,57 @@
+{
+  "users": [
+    {
+      "id": "user_admin_001",
+      "name": "TruthMail Admin",
+      "email": "admin@truthmail.com",
+      "password_hash": "$2b$10$i/j30fxKn1F73SPwgICKruFkgQ0YkYDEncGhsXgcCQBpFAUcGJ3d6",
+      "email_verified": 1,
+      "role": "admin",
+      "credits_balance": 100000,
+      "google_id": null,
+      "created_at": "2026-10-08T16:08:36.249Z",
+      "updated_at": "2026-10-08T16:08:36.249Z"
+    },
+    {
+      "id": "user_demo_002",
+      "name": "Demo Member",
+      "email": "demo@truthmail.com",
+      "password_hash": "$2b$10$TP6cHjiOM0PaeRrpYRCAu.dVNUIUw9iPFM6wtpHilfjzcm2MvNuji",
+      "email_verified": 1,
+      "role": "user",
+      "credits_balance": 100000,
+      "google_id": null,
+      "created_at": "2026-10-08T16:08:36.249Z",
+      "updated_at": "2026-10-08T16:08:36.249Z"
+    },
+    {
+      "id": "user_test_1",
+      "name": "Alice Tester",
+      "email": "alice.tester@truthmail.com",
+      "password_hash": "$2b$10$5u0.FpBaR092uedHxFSN2eVfPqSG0pgA3vC6nOK8p6zrNr4kb5m3C",
+      "email_verified": 1,
+      "role": "user",
+      "credits_balance": 100000,
+      "google_id": null,
+      "created_at": "2026-10-08T16:08:36.249Z",
+      "updated_at": "2026-10-08T16:08:36.249Z"
+    },
+    {
+      "id": "user_test_2",
+      "name": "Bob Tester",
+      "email": "bob.tester@truthmail.com",
+      "password_hash": "$2b$10$vG4k5hL3QAdgO7R8V3mBAOby73IczDn8PXXub8NRlEhE9IuqZXvQq",
+      "email_verified": 1,
+      "role": "user",
+      "credits_balance": 100000,
+      "google_id": null,
+      "created_at": "2026-10-08T16:08:36.249Z",
+      "updated_at": "2026-10-08T16:08:36.249Z"
+    }
+  ],
+  "verification_otps": [],
+  "verified_leads": [],
+  "threat_domains": [],
+  "threat_emails": [],
+  "validation_jobs": []
+}
