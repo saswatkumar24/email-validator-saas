@@ -1,6 +1,8 @@
 'use client';
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
+import Link from 'next/link';
+import AuthModal from '@/components/AuthModal';
 import {
   ShieldCheck,
   UploadCloud,
@@ -50,10 +52,33 @@ export default function TruthMailDashboard() {
   // Navigation tabs
   const [activeTab, setActiveTab] = useState<'bulk' | 'report' | 'single' | 'greymail' | 'pricing' | 'api'>('bulk');
 
-  // SaaS Credits State (100,000 credits for testing)
+  // SaaS Credits State
   const [credits, setCredits] = useState<number>(100000);
   const [topUpModalOpen, setTopUpModalOpen] = useState(false);
   const [topUpCredits, setTopUpCredits] = useState<number>(10000);
+
+  // Authentication State
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [authModalMode, setAuthModalMode] = useState<'login' | 'signup'>('login');
+
+  useEffect(() => {
+    fetch('/api/auth/me')
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.user) {
+          setCurrentUser(data.user);
+          setCredits(data.user.creditsBalance);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleLogout = async () => {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    setCurrentUser(null);
+    setCredits(100000);
+  };
 
   // Bulk Upload State
   const [uploadedSheet, setUploadedSheet] = useState<UploadedSheetInfo | null>(null);
@@ -524,19 +549,59 @@ export default function TruthMailDashboard() {
             </button>
           </nav>
 
-          {/* Credit Balance & Top Up */}
+          {/* Credit Balance & Auth Controls */}
           <div className="flex items-center space-x-3">
             <div className="flex items-center space-x-2 bg-slate-800/80 border border-slate-700/80 px-3.5 py-1.5 rounded-full text-xs">
               <span className="text-slate-400">Credits:</span>
               <span className="font-bold text-emerald-400 font-mono text-sm">{credits.toLocaleString()}</span>
             </div>
-            <button
-              onClick={() => setTopUpModalOpen(true)}
-              className="bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-xs px-3.5 py-1.5 rounded-full transition shadow-md shadow-emerald-600/20 flex items-center space-x-1"
-            >
-              <Sparkles className="w-3.5 h-3.5" />
-              <span>Add Credits</span>
-            </button>
+
+            {currentUser ? (
+              <div className="flex items-center space-x-2">
+                {currentUser.role === 'admin' && (
+                  <Link
+                    href="/admin"
+                    className="bg-purple-600/20 border border-purple-500/40 text-purple-300 hover:bg-purple-600 hover:text-white font-semibold text-xs px-3 py-1.5 rounded-full transition flex items-center space-x-1"
+                  >
+                    <span>Admin</span>
+                  </Link>
+                )}
+
+                <span className="text-xs text-slate-300 font-medium hidden sm:inline-block">
+                  {currentUser.name}
+                </span>
+
+                <button
+                  onClick={handleLogout}
+                  className="text-xs text-slate-400 hover:text-rose-400 border border-slate-800 hover:border-rose-500/30 px-3 py-1.5 rounded-full transition"
+                >
+                  Logout
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => {
+                    setAuthModalMode('login');
+                    setAuthModalOpen(true);
+                  }}
+                  className="text-xs font-semibold text-slate-300 hover:text-white px-3 py-1.5 transition"
+                >
+                  Sign In
+                </button>
+
+                <button
+                  onClick={() => {
+                    setAuthModalMode('signup');
+                    setAuthModalOpen(true);
+                  }}
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-xs px-3.5 py-1.5 rounded-full transition shadow-md shadow-emerald-600/20 flex items-center space-x-1"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Sign Up (+500)</span>
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </header>
@@ -2127,6 +2192,17 @@ export default function TruthMailDashboard() {
           </div>
         </div>
       </footer>
+
+      {/* Authentication Modal */}
+      <AuthModal
+        isOpen={authModalOpen}
+        initialMode={authModalMode}
+        onClose={() => setAuthModalOpen(false)}
+        onSuccess={(user) => {
+          setCurrentUser(user);
+          setCredits(user.creditsBalance);
+        }}
+      />
     </div>
   );
 }
