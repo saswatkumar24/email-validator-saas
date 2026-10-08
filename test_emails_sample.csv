@@ -1,0 +1,18 @@
+Email Address,Full Name,Company,Status
+elon.musk@x.com,Elon Musk,X Corp,Active
+satya.nadella@microsoft.com,Satya Nadella,Microsoft,Active
+tim.cook@apple.com,Tim Cook,Apple,Active
+alex.developer@gmail.com,Alex Dev,Personal,Active
+john.doe@gamil.com,John Doe,Acme Corp,Prospect (Typo)
+rachel.green@hotmial.com,Rachel Green,Retail,Lead (Typo)
+quicktest99@mailinator.com,Tester,Burner Inc,Disposable
+burner_account@guerrillamail.com,Anonymous,Hacker,Disposable
+admin@stripe.com,Admin Team,Stripe,Role Based
+support@shopify.com,Support Desk,Shopify,Role Based
+spamtrap-network-probe@spamhaus-seed.org,Trap Seed,Security,Spam Trap
+honeypot_trap_99@security-bait.com,Honeypot,Blocklist,Spam Trap
+newsletter-daily@techdigest.com,Newsletter,Media Corp,Greymail
+promotions-weekly@retailbrands.com,Promo,Brand,Greymail
+fakeuser@deadnonexistentdomain99881122.xyz,Dead User,Ghost LLC,Dead MX
+ghost@nowhere-fake-zone-12345.org,Ghost 2,Nowhere,Dead MX
+user..double_dot@bad..syntax.com,Syntax Error,Bad,Invalid
