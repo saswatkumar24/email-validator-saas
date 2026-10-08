@@ -1,4 +1,7 @@
 import dns from 'dns';
+try {
+  dns.setServers(['1.1.1.1', '8.8.8.8', '1.0.0.1', '8.8.4.4']);
+} catch {}
 import disposableDomainsList from '../data/disposable_domains.json';
 
 export interface ValidationDetail {
@@ -276,12 +279,15 @@ const KNOWN_MX_DOMAINS: Record<string, string[]> = {
 
 // In-memory DNS cache to accelerate bulk processing for repetitive domains
 const DNS_CACHE = new Map<string, { hasMx: boolean; mxRecords: string[]; hasA: boolean; timedOut: boolean; timestamp: number }>();
+// Pending in-flight domain lookups map to prevent redundant concurrent queries
+const DNS_PENDING_MAP = new Map<string, Promise<{ hasMx: boolean; mxRecords: string[]; hasA: boolean; timedOut: boolean }>>();
+const SECURITY_CACHE = new Map<string, { spfFound: boolean; spfRecord: string | null; dmarcFound: boolean; dmarcRecord: string | null }>();
 
-// Authoritative DNS MX and A Record check with caching & knowledgebase fallback
+// Authoritative DNS MX and A Record check with caching, concurrency deduplication & DoH validation
 async function resolveDns(domain: string): Promise<{ hasMx: boolean; mxRecords: string[]; hasA: boolean; timedOut: boolean }> {
   const lowerDomain = domain.toLowerCase().trim();
 
-  // 1. Check Known MX Providers Database First (Instant, 100% accurate, zero socket block risk)
+  // 1. Check Known MX Providers Database First (Instant 0ms, 100% accurate)
   if (KNOWN_MX_DOMAINS[lowerDomain]) {
     const mxRecords = KNOWN_MX_DOMAINS[lowerDomain];
     return { hasMx: true, mxRecords, hasA: true, timedOut: false };
@@ -293,7 +299,13 @@ async function resolveDns(domain: string): Promise<{ hasMx: boolean; mxRecords: 
     return cached;
   }
 
-  // 3. Known dead / fake / test patterns
+  // 3. Check In-Flight Pending Lookup (De-duplicates simultaneous queries for identical domains)
+  const pending = DNS_PENDING_MAP.get(lowerDomain);
+  if (pending) {
+    return pending;
+  }
+
+  // 4. Known dead / fake / test patterns
   if (
     lowerDomain.includes('nonexistent') ||
     lowerDomain.includes('dead') ||
@@ -308,58 +320,83 @@ async function resolveDns(domain: string): Promise<{ hasMx: boolean; mxRecords: 
     return deadResult;
   }
 
-  try {
-    const mxPromise = dns.promises.resolveMx(lowerDomain).then((records) => {
-      records.sort((a, b) => a.priority - b.priority);
-      return records.map((r) => r.exchange);
-    }).catch(() => [] as string[]);
+  const lookupPromise = (async () => {
+    try {
+      // Step A: Fast Node DNS query (with Anycast 1.1.1.1 / 8.8.8.8)
+      let mxRecords: string[] = [];
+      let hasA = false;
+      let nodeDnsFailed = false;
 
-    const aPromise = dns.promises.resolve4(lowerDomain).then((records) => records.length > 0).catch(() => false);
+      try {
+        const mxList = await dns.promises.resolveMx(lowerDomain);
+        mxList.sort((a, b) => a.priority - b.priority);
+        mxRecords = mxList.map((r) => r.exchange);
+      } catch (err: any) {
+        // ESERVFAIL (e.g. kabinet.cz with broken/refusing nameservers), ENOTFOUND, ENODATA
+        nodeDnsFailed = true;
+      }
 
-    // Timeout safeguard after 1.5 seconds
-    const timeoutPromise = new Promise<{ hasMx: boolean; mxRecords: string[]; hasA: boolean; timedOut: true }>((resolve) => {
-      setTimeout(() => resolve({ hasMx: false, mxRecords: [], hasA: false, timedOut: true }), 1500);
-    });
+      try {
+        const aList = await dns.promises.resolve4(lowerDomain);
+        hasA = aList.length > 0;
+      } catch {
+        // A record not found or refused
+      }
 
-    const result = await Promise.race([
-      Promise.all([mxPromise, aPromise]).then(([mxRecords, hasA]) => ({
-        hasMx: mxRecords.length > 0,
-        mxRecords,
-        hasA,
-        timedOut: false,
-      })),
-      timeoutPromise,
-    ]);
+      if (mxRecords.length > 0 || hasA) {
+        const result = { hasMx: mxRecords.length > 0, mxRecords, hasA, timedOut: false };
+        DNS_CACHE.set(lowerDomain, { ...result, timestamp: Date.now() });
+        return result;
+      }
 
-    // If live DNS resolved successfully, save and return
-    if (result.hasMx || result.hasA) {
-      DNS_CACHE.set(lowerDomain, { ...result, timestamp: Date.now() });
-      return result;
+      // Step B: If Node DNS had no records or failed with ESERVFAIL/REFUSED, verify with Google DoH (<80ms worldwide)
+      try {
+        const controller = new AbortController();
+        const dohTimeout = setTimeout(() => controller.abort(), 1200);
+        const dohRes = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(lowerDomain)}&type=MX`, {
+          headers: { Accept: 'application/dns-json' },
+          signal: controller.signal,
+        }).then((r) => r.json()).catch(() => null);
+        clearTimeout(dohTimeout);
+
+        if (dohRes) {
+          // Status 2: SERVFAIL (Dead/refusing nameservers, lame delegation e.g. kabinet.cz)
+          // Status 3: NXDOMAIN (Domain does not exist)
+          // Status 0 with no Answer: Domain exists but has no MX
+          if (dohRes.Status === 2 || dohRes.Status === 3 || !dohRes.Answer || dohRes.Answer.length === 0) {
+            const deadResult = { hasMx: false, mxRecords: [], hasA: false, timedOut: false };
+            DNS_CACHE.set(lowerDomain, { ...deadResult, timestamp: Date.now() });
+            return deadResult;
+          }
+
+          const dohMx = (dohRes.Answer || [])
+            .filter((a: any) => a.type === 15)
+            .map((a: any) => (a.data || '').split(' ').pop()?.replace(/\.$/, ''))
+            .filter(Boolean);
+
+          if (dohMx.length > 0) {
+            const result = { hasMx: true, mxRecords: dohMx, hasA: true, timedOut: false };
+            DNS_CACHE.set(lowerDomain, { ...result, timestamp: Date.now() });
+            return result;
+          }
+        }
+      } catch {}
+
+      // Concluded: Domain has no active MX records
+      const finalResult = { hasMx: false, mxRecords: [], hasA: false, timedOut: false };
+      DNS_CACHE.set(lowerDomain, { ...finalResult, timestamp: Date.now() });
+      return finalResult;
+    } catch {
+      const fallback = { hasMx: false, mxRecords: [], hasA: false, timedOut: false };
+      DNS_CACHE.set(lowerDomain, { ...fallback, timestamp: Date.now() });
+      return fallback;
+    } finally {
+      DNS_PENDING_MAP.delete(lowerDomain);
     }
+  })();
 
-    // If network socket was blocked by sandbox (econnrefused) on a valid corporate TLD domain:
-    const tldParts = lowerDomain.split('.');
-    const tld = tldParts[tldParts.length - 1];
-    const validTlds = ['com', 'org', 'net', 'edu', 'gov', 'io', 'ai', 'co', 'in', 'uk', 'de', 'fr', 'ca', 'au', 'jp', 'me', 'app', 'dev', 'tech', 'biz', 'info', 'us', 'cc'];
-
-    if (validTlds.includes(tld) && tldParts.length >= 2 && tldParts[0].length >= 2) {
-      const fallbackValid = {
-        hasMx: true,
-        mxRecords: [`mail.${lowerDomain}`],
-        hasA: true,
-        timedOut: false,
-      };
-      DNS_CACHE.set(lowerDomain, { ...fallbackValid, timestamp: Date.now() });
-      return fallbackValid;
-    }
-
-    DNS_CACHE.set(lowerDomain, { ...result, timestamp: Date.now() });
-    return result;
-  } catch {
-    const fallback = { hasMx: false, mxRecords: [], hasA: false, timedOut: false };
-    DNS_CACHE.set(lowerDomain, { ...fallback, timestamp: Date.now() });
-    return fallback;
-  }
+  DNS_PENDING_MAP.set(lowerDomain, lookupPromise);
+  return lookupPromise;
 }
 
 // Known SPF and DMARC policy database for top providers
@@ -432,13 +469,16 @@ async function fetchDohSecurityRecords(domain: string): Promise<{ spfFound: bool
   if (KNOWN_SECURITY_RECORDS[lowerDomain]) {
     return KNOWN_SECURITY_RECORDS[lowerDomain];
   }
+  if (SECURITY_CACHE.has(lowerDomain)) {
+    return SECURITY_CACHE.get(lowerDomain)!;
+  }
 
   try {
     const spfUrl = `https://dns.google/resolve?name=${encodeURIComponent(lowerDomain)}&type=TXT`;
     const dmarcUrl = `https://dns.google/resolve?name=${encodeURIComponent('_dmarc.' + lowerDomain)}&type=TXT`;
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 1200);
+    const timeout = setTimeout(() => controller.abort(), 1000);
 
     const [spfRes, dmarcRes] = await Promise.all([
       fetch(spfUrl, { signal: controller.signal, headers: { Accept: 'application/dns-json' } }).then((r) => r.json()).catch(() => null),
@@ -466,19 +506,23 @@ async function fetchDohSecurityRecords(domain: string): Promise<{ spfFound: bool
       }
     }
 
-    return {
+    const secResult = {
       spfFound: Boolean(spfRecord),
       spfRecord: spfRecord || 'v=spf1 mx ~all (standard domain record)',
       dmarcFound: Boolean(dmarcRecord),
       dmarcRecord: dmarcRecord || 'v=DMARC1; p=none (standard domain policy)',
     };
+    SECURITY_CACHE.set(lowerDomain, secResult);
+    return secResult;
   } catch {
-    return {
+    const fallback = {
       spfFound: true,
       spfRecord: 'v=spf1 mx ~all (standard domain record)',
       dmarcFound: true,
       dmarcRecord: 'v=DMARC1; p=none (standard domain policy)',
     };
+    SECURITY_CACHE.set(lowerDomain, fallback);
+    return fallback;
   }
 }
 
@@ -546,23 +590,30 @@ export async function validateEmail(rawEmail: string): Promise<EmailValidationRe
   // Greymails are low-engagement, bulk newsletter/promotional mailboxes that have high spam-complaint rates
   const isGreymail = GREYMAIL_PREFIXES.some((prefix) => localPart.startsWith(prefix) || localPart === prefix);
 
-  // 8. DNS & MX Record Resolution + Free DoH Security Records
-  const [dnsResult, securityResult] = await Promise.all([
-    resolveDns(domain),
-    fetchDohSecurityRecords(domain),
-  ]);
+  // 8. DNS & MX Record Resolution
+  const dnsResult = await resolveDns(domain);
 
-  // 9. Catch-All Heuristics (Deterministic evaluation)
+  // 9. SPF & DMARC Security Verification (Only queried if MX exists, saving massive CPU and network bandwidth)
+  const securityResult = dnsResult.hasMx
+    ? await fetchDohSecurityRecords(domain)
+    : {
+        spfFound: false,
+        spfRecord: 'No active MX host records found',
+        dmarcFound: false,
+        dmarcRecord: 'No active MX host records found',
+      };
+
+  // 10. Catch-All Heuristics (Deterministic evaluation)
   const isCatchAll = false;
 
-  // 10. SMTP Handshake Simulation & Deliverability Evaluation
+  // 11. SMTP Handshake Simulation & Deliverability Evaluation
   let smtpDeliverable = false;
   let smtpCode = '550';
   let smtpMessage = 'Mailbox does not exist';
 
   if (!dnsResult.hasMx && !dnsResult.hasA) {
     smtpCode = '550';
-    smtpMessage = dnsResult.timedOut ? 'DNS lookup timed out' : 'No MX or A records found for domain';
+    smtpMessage = dnsResult.timedOut ? 'DNS lookup timed out' : 'No active MX host records found';
   } else if (isDisposable) {
     smtpCode = '421';
     smtpMessage = 'Temporary / burner email address rejected';
@@ -685,8 +736,8 @@ export async function validateBatch(emails: string[]): Promise<BatchValidationSu
   const uniqueEmails = Array.from(new Set(emails.map((e) => (e || '').trim()).filter(Boolean)));
   const results: EmailValidationResult[] = [];
 
-  // Concurrency chunking (process 50 at a time with DNS caching)
-  const CHUNK_SIZE = 50;
+  // Concurrency chunking (process 25 at a time with in-flight DNS memoization)
+  const CHUNK_SIZE = 25;
   for (let i = 0; i < uniqueEmails.length; i += CHUNK_SIZE) {
     const chunk = uniqueEmails.slice(i, i + CHUNK_SIZE);
     const chunkResults = await Promise.all(chunk.map((email) => validateEmail(email)));
