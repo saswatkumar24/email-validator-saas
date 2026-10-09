@@ -328,19 +328,25 @@ async function resolveDns(domain: string): Promise<{ hasMx: boolean; mxRecords: 
       let nodeDnsFailed = false;
 
       try {
-        const mxList = await dns.promises.resolveMx(lowerDomain);
+        const mxList = await Promise.race([
+          dns.promises.resolveMx(lowerDomain),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 800)),
+        ]);
         mxList.sort((a, b) => a.priority - b.priority);
         mxRecords = mxList.map((r) => r.exchange);
       } catch (err: any) {
-        // ESERVFAIL (e.g. kabinet.cz with broken/refusing nameservers), ENOTFOUND, ENODATA
+        // ESERVFAIL (e.g. kabinet.cz with broken/refusing nameservers), ENOTFOUND, ENODATA, timeout
         nodeDnsFailed = true;
       }
 
       try {
-        const aList = await dns.promises.resolve4(lowerDomain);
+        const aList = await Promise.race([
+          dns.promises.resolve4(lowerDomain),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 800)),
+        ]);
         hasA = aList.length > 0;
       } catch {
-        // A record not found or refused
+        // A record not found, refused, or timed out
       }
 
       if (mxRecords.length > 0 || hasA) {
@@ -352,7 +358,7 @@ async function resolveDns(domain: string): Promise<{ hasMx: boolean; mxRecords: 
       // Step B: If Node DNS had no records or failed with ESERVFAIL/REFUSED, verify with Google DoH (<80ms worldwide)
       try {
         const controller = new AbortController();
-        const dohTimeout = setTimeout(() => controller.abort(), 1200);
+        const dohTimeout = setTimeout(() => controller.abort(), 800);
         const dohRes = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(lowerDomain)}&type=MX`, {
           headers: { Accept: 'application/dns-json' },
           signal: controller.signal,
@@ -734,15 +740,37 @@ export interface BatchValidationSummary {
 
 export async function validateBatch(emails: string[]): Promise<BatchValidationSummary> {
   const uniqueEmails = Array.from(new Set(emails.map((e) => (e || '').trim()).filter(Boolean)));
-  const results: EmailValidationResult[] = [];
 
-  // Concurrency chunking (process 25 at a time with in-flight DNS memoization)
-  const CHUNK_SIZE = 25;
-  for (let i = 0; i < uniqueEmails.length; i += CHUNK_SIZE) {
-    const chunk = uniqueEmails.slice(i, i + CHUNK_SIZE);
-    const chunkResults = await Promise.all(chunk.map((email) => validateEmail(email)));
-    results.push(...chunkResults);
-  }
+  // 1. Extract unique domains from the batch
+  const uniqueDomains = Array.from(
+    new Set(
+      uniqueEmails
+        .map((e) => {
+          const atIdx = e.lastIndexOf('@');
+          return atIdx !== -1 ? e.slice(atIdx + 1).toLowerCase().trim() : '';
+        })
+        .filter(Boolean)
+    )
+  );
+
+  // 2. Pre-resolve DNS and Security for all unique domains in parallel with 800ms race timeout
+  await Promise.all(
+    uniqueDomains.map(async (domain) => {
+      try {
+        const dnsRes = await resolveDns(domain);
+        if (dnsRes.hasMx) {
+          await fetchDohSecurityRecords(domain);
+        }
+      } catch {
+        // Safe fallback handled within resolveDns
+      }
+    })
+  );
+
+  // 3. Concurrently validate all emails (all domains are now warm in DNS/Security caches, taking ~0ms each)
+  const results: EmailValidationResult[] = await Promise.all(
+    uniqueEmails.map((email) => validateEmail(email))
+  );
 
   let mailable = 0;
   let nonMailable = 0;

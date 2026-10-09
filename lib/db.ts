@@ -91,12 +91,17 @@ function getLocalStore(): LocalStore {
   return memoryStore!;
 }
 
+let saveTimer: any = null;
 function saveLocalStore(store: LocalStore) {
-  try {
-    fs.writeFileSync(STORE_PATH, JSON.stringify(store, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Failed to save local store:', err);
-  }
+  if (saveTimer) return;
+  saveTimer = setTimeout(async () => {
+    saveTimer = null;
+    try {
+      await fs.promises.writeFile(STORE_PATH, JSON.stringify(store), 'utf-8');
+    } catch (err) {
+      console.error('Failed to save local store:', err);
+    }
+  }, 500);
 }
 
 function createInitialStore(): LocalStore {
