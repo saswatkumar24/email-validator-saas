@@ -387,7 +387,7 @@ async function resolveDns(domain: string): Promise<{ hasMx: boolean; mxRecords: 
       try {
         const mxList = await Promise.race([
           dns.promises.resolveMx(lowerDomain),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 3500)),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000)),
         ]);
         mxList.sort((a, b) => a.priority - b.priority);
         mxRecords = mxList
@@ -398,14 +398,14 @@ async function resolveDns(domain: string): Promise<{ hasMx: boolean; mxRecords: 
         if (err.code === 'ENOTFOUND') failureReason = 'ENOTFOUND (Domain does not exist in DNS)';
         else if (err.code === 'ENODATA') failureReason = 'ENODATA (Domain exists but publishes zero MX records)';
         else if (err.code === 'ESERVFAIL') failureReason = 'ESERVFAIL (Domain nameservers refused/broken)';
-        else if (err.message === 'timeout') failureReason = 'TIMEOUT (DNS query timed out after 3.5s)';
+        else if (err.message === 'timeout') failureReason = 'TIMEOUT (DNS query timed out after 4s)';
         else failureReason = `DNS Error (${err.code || err.message})`;
       }
 
       try {
         const aList = await Promise.race([
           dns.promises.resolve4(lowerDomain),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 3500)),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000)),
         ]);
         hasA = aList.length > 0;
       } catch {
@@ -423,15 +423,36 @@ async function resolveDns(domain: string): Promise<{ hasMx: boolean; mxRecords: 
         return result;
       }
 
-      // Step B: Authoritative verification via Google DNS-over-HTTPS (DoH) over reliable HTTPS
+      // Step B: Authoritative verification via Dual DoH (Google DoH -> Cloudflare DoH)
       try {
-        const controller = new AbortController();
-        const dohTimeout = setTimeout(() => controller.abort(), 3500);
-        const dohRes = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(lowerDomain)}&type=MX`, {
-          headers: { Accept: 'application/dns-json' },
-          signal: controller.signal,
-        }).then((r) => r.json()).catch(() => null);
-        clearTimeout(dohTimeout);
+        let dohRes: any = null;
+
+        // Tier 1 DoH: Google
+        try {
+          const controller = new AbortController();
+          const dohTimeout = setTimeout(() => controller.abort(), 4000);
+          dohRes = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(lowerDomain)}&type=MX`, {
+            headers: { Accept: 'application/dns-json' },
+            signal: controller.signal,
+          }).then((r) => r.json()).catch(() => null);
+          clearTimeout(dohTimeout);
+        } catch {}
+
+        // Tier 2 DoH: Cloudflare (1.1.1.1 fallback if Google timed out or failed)
+        if (!dohRes || (dohRes.Status !== 0 && dohRes.Status !== 3 && dohRes.Status !== 2 && !dohRes.Answer)) {
+          try {
+            const cfController = new AbortController();
+            const cfTimeout = setTimeout(() => cfController.abort(), 4000);
+            const cfRes = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(lowerDomain)}&type=MX`, {
+              headers: { Accept: 'application/dns-json' },
+              signal: cfController.signal,
+            }).then((r) => r.json()).catch(() => null);
+            clearTimeout(cfTimeout);
+            if (cfRes) {
+              dohRes = cfRes;
+            }
+          } catch {}
+        }
 
         if (dohRes) {
           const dohMx = (dohRes.Answer || [])
