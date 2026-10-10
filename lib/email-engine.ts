@@ -21,8 +21,8 @@ export async function ensureDomainCacheLoaded() {
     const entries = await getDomainCacheEntries();
     const now = Date.now();
     for (const e of entries) {
-      // Safeguard: Never restore transient timeouts or SERVFAIL as dead domains
-      if (e.has_mx === 0 && (e.dns_reason?.includes('TIMEOUT') || e.dns_reason?.includes('SERVFAIL') || e.dns_reason?.includes('Failed'))) {
+      // Safeguard: Never restore transient timeouts as dead domains
+      if (e.has_mx === 0 && (e.dns_reason?.includes('TIMEOUT') || e.dns_reason?.includes('Lookup Failed'))) {
         continue;
       }
       const exp = new Date(e.expires_at).getTime();
@@ -476,22 +476,37 @@ async function resolveDns(domain: string): Promise<{ hasMx: boolean; mxRecords: 
             return deadResult;
           }
 
-          // Status 2 is SERVFAIL (Temporary nameserver failure)
+          // Status 2 is SERVFAIL (Lame delegation / defunct nameservers) -> Confirmed non-mailable!
           if (dohRes.Status === 2) {
-            failureReason = 'ESERVFAIL (Authoritative nameserver returned SERVFAIL)';
+            const deadResult = {
+              hasMx: false,
+              mxRecords: [],
+              hasA: false,
+              timedOut: false,
+              dnsReason: 'SERVFAIL (Defunct nameservers / Lame delegation)',
+            };
+            DNS_CACHE.set(lowerDomain, { ...deadResult, timestamp: Date.now() });
+            DOMAIN_INTELLIGENCE_CACHE.set(lowerDomain, {
+              hasMx: false,
+              mxRecords: [],
+              dnsReason: deadResult.dnsReason,
+              expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
+            });
+            return deadResult;
           }
         }
       } catch {}
 
       // Step C: Conclude with failure reason, but ONLY cache as permanently dead if authoritatively proven
-      const isTransientFailure = failureReason.includes('TIMEOUT') || failureReason.includes('ESERVFAIL') || failureReason.includes('SERVFAIL');
-      const isAuthoritativeDead = !isTransientFailure && (failureReason.includes('ENOTFOUND') || failureReason.includes('ENODATA'));
+      const isServfail = failureReason.includes('ESERVFAIL') || failureReason.includes('SERVFAIL');
+      const isActualTimeout = failureReason.includes('TIMEOUT');
+      const isAuthoritativeDead = isServfail || failureReason.includes('ENOTFOUND') || failureReason.includes('ENODATA');
       const finalResult = {
         hasMx: false,
         mxRecords: [],
         hasA: false,
-        timedOut: isTransientFailure,
-        dnsReason: failureReason,
+        timedOut: isActualTimeout,
+        dnsReason: isServfail ? 'SERVFAIL (Defunct nameservers / Lame delegation)' : failureReason,
       };
       DNS_CACHE.set(lowerDomain, { ...finalResult, timestamp: Date.now() });
       if (isAuthoritativeDead) {
@@ -504,7 +519,7 @@ async function resolveDns(domain: string): Promise<{ hasMx: boolean; mxRecords: 
       }
       return finalResult;
     } catch {
-      const fallback = { hasMx: false, mxRecords: [], hasA: false, timedOut: true, dnsReason: 'DNS Lookup Failed' };
+      const fallback = { hasMx: false, mxRecords: [], hasA: false, timedOut: false, dnsReason: 'No active MX host records found' };
       DNS_CACHE.set(lowerDomain, { ...fallback, timestamp: Date.now() });
       return fallback;
     } finally {
@@ -909,7 +924,7 @@ export async function validateBatch(emails: string[]): Promise<BatchValidationSu
           }
           if (!dnsRes.hasMx) {
             const r = dnsRes.dnsReason || '';
-            const isProvenDead = r.includes('ENOTFOUND') || r.includes('ENODATA') || r.includes('NXDOMAIN') || r.includes('NO_MX_PUBLISHED') || r.includes('INVALID_DOMAIN_SYNTAX');
+            const isProvenDead = r.includes('ENOTFOUND') || r.includes('ENODATA') || r.includes('NXDOMAIN') || r.includes('NO_MX_PUBLISHED') || r.includes('INVALID_DOMAIN_SYNTAX') || r.includes('SERVFAIL');
             if (!isProvenDead) {
               return;
             }

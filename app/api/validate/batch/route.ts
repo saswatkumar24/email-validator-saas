@@ -85,7 +85,7 @@ export async function POST(req: NextRequest) {
             });
           } else if (item.subStatus === 'no_mx_record') {
             const reason = item.details.dnsReason || '';
-            const isProvenDead = reason.includes('ENOTFOUND') || reason.includes('ENODATA') || reason.includes('NXDOMAIN') || reason.includes('NO_MX_PUBLISHED') || reason.includes('INVALID_DOMAIN_SYNTAX');
+            const isProvenDead = reason.includes('ENOTFOUND') || reason.includes('ENODATA') || reason.includes('NXDOMAIN') || reason.includes('NO_MX_PUBLISHED') || reason.includes('INVALID_DOMAIN_SYNTAX') || reason.includes('SERVFAIL');
             if (isProvenDead) {
               threatsToSave.push({
                 domain: item.details.domain,
