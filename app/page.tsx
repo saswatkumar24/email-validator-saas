@@ -296,6 +296,12 @@ export default function TruthMailDashboard() {
         corporateB2B: 0,
       };
 
+      const cleanFileName = (uploadedSheet?.name || 'bulk_verification.csv')
+        .replace(/[^a-zA-Z0-9._-]/g, '_')
+        .replace(/\.[^/.]+$/, '');
+      const runTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const runId = `${runTimestamp}_${cleanFileName}`;
+
       for (let c = 0; c < chunks.length; c++) {
         const currentChunk = chunks[c];
         const processedSoFar = c * BATCH_SIZE;
@@ -313,7 +319,13 @@ export default function TruthMailDashboard() {
             const res = await fetch('/api/validate/batch', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ emails: currentChunk }),
+              body: JSON.stringify({
+                emails: currentChunk,
+                filename: uploadedSheet?.name || 'bulk_verification.csv',
+                runId,
+                batchIndex: c + 1,
+                totalBatches: chunks.length,
+              }),
             });
 
             if (!res.ok) {
@@ -367,6 +379,7 @@ export default function TruthMailDashboard() {
         risky: aggregatedRisky,
         unknown: aggregatedUnknown,
         averageQualityScore: aggregatedResults.length > 0 ? Math.round(aggregatedScoreSum / aggregatedResults.length) : 0,
+        executionTimeMs: 0,
         riskBreakdown: aggregatedRisk,
         providerBreakdown: aggregatedProvider,
         results: aggregatedResults,

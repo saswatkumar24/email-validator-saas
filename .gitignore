@@ -31,4 +31,5 @@ test_sample.xlsx
 data/*.db*
 data/*.db-shm
 data/*.db-wal
+logs/
 

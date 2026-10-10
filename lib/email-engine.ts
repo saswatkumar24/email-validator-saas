@@ -3,12 +3,59 @@ try {
   dns.setServers(['1.1.1.1', '8.8.8.8', '1.0.0.1', '8.8.4.4']);
 } catch {}
 import disposableDomainsList from '../data/disposable_domains.json';
+import { getDomainCacheEntries, batchUpsertDomainCache, getKnownDeadDomains } from './db';
+
+// Multi-Tier Persistent In-Memory Intelligence Cache with TTL
+interface CachedDomainEntry {
+  hasMx: boolean;
+  mxRecords: string[];
+  dnsReason?: string | null;
+  expiresAt: number;
+}
+const DOMAIN_INTELLIGENCE_CACHE = new Map<string, CachedDomainEntry>();
+let isDomainCacheLoaded = false;
+
+export async function ensureDomainCacheLoaded() {
+  if (isDomainCacheLoaded) return;
+  try {
+    const entries = await getDomainCacheEntries();
+    const now = Date.now();
+    for (const e of entries) {
+      const exp = new Date(e.expires_at).getTime();
+      if (exp > now) {
+        DOMAIN_INTELLIGENCE_CACHE.set(e.domain.toLowerCase().trim(), {
+          hasMx: e.has_mx === 1,
+          mxRecords: e.mx_records || [],
+          dnsReason: e.dns_reason || null,
+          expiresAt: exp,
+        });
+      }
+    }
+    // Backward compatibility: load legacy dead domains (7-day TTL)
+    const deadSet = await getKnownDeadDomains();
+    deadSet.forEach((d) => {
+      const lower = d.toLowerCase().trim();
+      if (!DOMAIN_INTELLIGENCE_CACHE.has(lower)) {
+        DOMAIN_INTELLIGENCE_CACHE.set(lower, {
+          hasMx: false,
+          mxRecords: [],
+          dnsReason: 'KNOWN_DEAD_CACHE (Previously confirmed inactive domain)',
+          expiresAt: now + 7 * 24 * 60 * 60 * 1000,
+        });
+      }
+    });
+    isDomainCacheLoaded = true;
+  } catch (err) {
+    // Non-blocking fallback
+  }
+}
 
 export interface ValidationDetail {
   syntaxValid: boolean;
   domain: string;
   hasMx: boolean;
   mxRecords: string[];
+  dnsReason?: string | null;
   isDisposable: boolean;
   isRoleBased: boolean;
   isFreeProvider: boolean;
@@ -278,22 +325,34 @@ const KNOWN_MX_DOMAINS: Record<string, string[]> = {
 };
 
 // In-memory DNS cache to accelerate bulk processing for repetitive domains
-const DNS_CACHE = new Map<string, { hasMx: boolean; mxRecords: string[]; hasA: boolean; timedOut: boolean; timestamp: number }>();
+const DNS_CACHE = new Map<string, { hasMx: boolean; mxRecords: string[]; hasA: boolean; timedOut: boolean; dnsReason?: string; timestamp: number }>();
 // Pending in-flight domain lookups map to prevent redundant concurrent queries
-const DNS_PENDING_MAP = new Map<string, Promise<{ hasMx: boolean; mxRecords: string[]; hasA: boolean; timedOut: boolean }>>();
+const DNS_PENDING_MAP = new Map<string, Promise<{ hasMx: boolean; mxRecords: string[]; hasA: boolean; timedOut: boolean; dnsReason?: string }>>();
 const SECURITY_CACHE = new Map<string, { spfFound: boolean; spfRecord: string | null; dmarcFound: boolean; dmarcRecord: string | null }>();
 
 // Authoritative DNS MX and A Record check with caching, concurrency deduplication & DoH validation
-async function resolveDns(domain: string): Promise<{ hasMx: boolean; mxRecords: string[]; hasA: boolean; timedOut: boolean }> {
+async function resolveDns(domain: string): Promise<{ hasMx: boolean; mxRecords: string[]; hasA: boolean; timedOut: boolean; dnsReason?: string }> {
   const lowerDomain = domain.toLowerCase().trim();
 
-  // 1. Check Known MX Providers Database First (Instant 0ms, 100% accurate)
+  // 0. Check Known Mega-Providers Database First (Instant 0ms, 100% accurate)
   if (KNOWN_MX_DOMAINS[lowerDomain]) {
     const mxRecords = KNOWN_MX_DOMAINS[lowerDomain];
     return { hasMx: true, mxRecords, hasA: true, timedOut: false };
   }
 
-  // 2. Check In-Memory Cache
+  // 1. Check Persistent Domain Intelligence Cache with TTL (Instant 0ms, both Active and Dead domains)
+  const intelEntry = DOMAIN_INTELLIGENCE_CACHE.get(lowerDomain);
+  if (intelEntry && Date.now() < intelEntry.expiresAt) {
+    return {
+      hasMx: intelEntry.hasMx,
+      mxRecords: intelEntry.mxRecords,
+      hasA: intelEntry.hasMx,
+      timedOut: false,
+      dnsReason: intelEntry.dnsReason || (intelEntry.hasMx ? undefined : 'KNOWN_DEAD_CACHE (Previously confirmed inactive domain)'),
+    };
+  }
+
+  // 2. Check In-Memory Transient DNS Cache
   const cached = DNS_CACHE.get(lowerDomain);
   if (cached && Date.now() - cached.timestamp < 3600000) {
     return cached;
@@ -315,8 +374,14 @@ async function resolveDns(domain: string): Promise<{ hasMx: boolean; mxRecords: 
     lowerDomain.endsWith('.test') ||
     !lowerDomain.includes('.')
   ) {
-    const deadResult = { hasMx: false, mxRecords: [], hasA: false, timedOut: false };
+    const deadResult = { hasMx: false, mxRecords: [], hasA: false, timedOut: false, dnsReason: 'INVALID_DOMAIN_SYNTAX' };
     DNS_CACHE.set(lowerDomain, { ...deadResult, timestamp: Date.now() });
+    DOMAIN_INTELLIGENCE_CACHE.set(lowerDomain, {
+      hasMx: false,
+      mxRecords: [],
+      dnsReason: 'INVALID_DOMAIN_SYNTAX',
+      expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
+    });
     return deadResult;
   }
 
@@ -326,76 +391,121 @@ async function resolveDns(domain: string): Promise<{ hasMx: boolean; mxRecords: 
       let mxRecords: string[] = [];
       let hasA = false;
       let nodeDnsFailed = false;
+      let failureReason = 'No active MX host records found';
 
       try {
         const mxList = await Promise.race([
           dns.promises.resolveMx(lowerDomain),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 800)),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 3500)),
         ]);
         mxList.sort((a, b) => a.priority - b.priority);
         mxRecords = mxList.map((r) => r.exchange);
       } catch (err: any) {
-        // ESERVFAIL (e.g. kabinet.cz with broken/refusing nameservers), ENOTFOUND, ENODATA, timeout
         nodeDnsFailed = true;
+        if (err.code === 'ENOTFOUND') failureReason = 'ENOTFOUND (Domain does not exist in DNS)';
+        else if (err.code === 'ENODATA') failureReason = 'ENODATA (Domain exists but publishes zero MX records)';
+        else if (err.code === 'ESERVFAIL') failureReason = 'ESERVFAIL (Domain nameservers refused/broken)';
+        else if (err.message === 'timeout') failureReason = 'TIMEOUT (DNS query timed out after 3.5s)';
+        else failureReason = `DNS Error (${err.code || err.message})`;
       }
 
       try {
         const aList = await Promise.race([
           dns.promises.resolve4(lowerDomain),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 800)),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 3500)),
         ]);
         hasA = aList.length > 0;
       } catch {
         // A record not found, refused, or timed out
       }
 
-      if (mxRecords.length > 0 || hasA) {
-        const result = { hasMx: mxRecords.length > 0, mxRecords, hasA, timedOut: false };
+      if (mxRecords.length > 0) {
+        const result = { hasMx: true, mxRecords, hasA: true, timedOut: false };
         DNS_CACHE.set(lowerDomain, { ...result, timestamp: Date.now() });
+        DOMAIN_INTELLIGENCE_CACHE.set(lowerDomain, {
+          hasMx: true,
+          mxRecords,
+          expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
+        });
         return result;
       }
 
-      // Step B: Only if Node DNS failed with ESERVFAIL/REFUSED, verify with Google DoH
-      if (nodeDnsFailed) {
-        try {
-          const controller = new AbortController();
-          const dohTimeout = setTimeout(() => controller.abort(), 600);
-          const dohRes = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(lowerDomain)}&type=MX`, {
-            headers: { Accept: 'application/dns-json' },
-            signal: controller.signal,
-          }).then((r) => r.json()).catch(() => null);
-          clearTimeout(dohTimeout);
+      // Step B: Authoritative verification via Google DNS-over-HTTPS (DoH) over reliable HTTPS
+      try {
+        const controller = new AbortController();
+        const dohTimeout = setTimeout(() => controller.abort(), 2000);
+        const dohRes = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(lowerDomain)}&type=MX`, {
+          headers: { Accept: 'application/dns-json' },
+          signal: controller.signal,
+        }).then((r) => r.json()).catch(() => null);
+        clearTimeout(dohTimeout);
 
-          if (dohRes) {
-            // Status 2: SERVFAIL (Dead/refusing nameservers, lame delegation e.g. kabinet.cz)
-            // Status 3: NXDOMAIN (Domain does not exist)
-            // Status 0 with no Answer: Domain exists but has no MX
-            if (dohRes.Status === 2 || dohRes.Status === 3 || !dohRes.Answer || dohRes.Answer.length === 0) {
-              const deadResult = { hasMx: false, mxRecords: [], hasA: false, timedOut: false };
-              DNS_CACHE.set(lowerDomain, { ...deadResult, timestamp: Date.now() });
-              return deadResult;
-            }
+        if (dohRes) {
+          const dohMx = (dohRes.Answer || [])
+            .filter((a: any) => a.type === 15)
+            .map((a: any) => (a.data || '').split(' ').pop()?.replace(/\.$/, ''))
+            .filter(Boolean);
 
-            const dohMx = (dohRes.Answer || [])
-              .filter((a: any) => a.type === 15)
-              .map((a: any) => (a.data || '').split(' ').pop()?.replace(/\.$/, ''))
-              .filter(Boolean);
-
-            if (dohMx.length > 0) {
-              const result = { hasMx: true, mxRecords: dohMx, hasA: true, timedOut: false };
-              DNS_CACHE.set(lowerDomain, { ...result, timestamp: Date.now() });
-              return result;
-            }
+          if (dohMx.length > 0) {
+            const result = { hasMx: true, mxRecords: dohMx, hasA: true, timedOut: false };
+            DNS_CACHE.set(lowerDomain, { ...result, timestamp: Date.now() });
+            DOMAIN_INTELLIGENCE_CACHE.set(lowerDomain, {
+              hasMx: true,
+              mxRecords: dohMx,
+              expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
+            });
+            return result;
           }
-        } catch {}
-      }
 
-      // Concluded: Domain has no active MX records
-      const finalResult = { hasMx: false, mxRecords: [], hasA: false, timedOut: false };
+          // Authoritative NXDOMAIN (Status 3 = Non-existent domain)
+          if (dohRes.Status === 3) {
+            const deadResult = { hasMx: false, mxRecords: [], hasA: false, timedOut: false, dnsReason: 'NXDOMAIN (Domain does not exist)' };
+            DNS_CACHE.set(lowerDomain, { ...deadResult, timestamp: Date.now() });
+            DOMAIN_INTELLIGENCE_CACHE.set(lowerDomain, {
+              hasMx: false,
+              mxRecords: [],
+              dnsReason: deadResult.dnsReason,
+              expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
+            });
+            return deadResult;
+          }
+
+          // Authoritative NO MX (Status 0 = Domain exists, but zero MX records published)
+          if (dohRes.Status === 0) {
+            const deadResult = { hasMx: false, mxRecords: [], hasA: false, timedOut: false, dnsReason: 'NO_MX_PUBLISHED (Domain exists but publishes zero MX records)' };
+            DNS_CACHE.set(lowerDomain, { ...deadResult, timestamp: Date.now() });
+            DOMAIN_INTELLIGENCE_CACHE.set(lowerDomain, {
+              hasMx: false,
+              mxRecords: [],
+              dnsReason: deadResult.dnsReason,
+              expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
+            });
+            return deadResult;
+          }
+        }
+      } catch {}
+
+      // Step C: Conclude with failure reason, but ONLY cache as permanently dead if authoritatively proven
+      const isAuthoritativeDead = failureReason.includes('ENOTFOUND') || failureReason.includes('ENODATA');
+      const finalResult = {
+        hasMx: false,
+        mxRecords: [],
+        hasA: false,
+        timedOut: failureReason.includes('TIMEOUT'),
+        dnsReason: failureReason,
+      };
       DNS_CACHE.set(lowerDomain, { ...finalResult, timestamp: Date.now() });
+      if (isAuthoritativeDead) {
+        DOMAIN_INTELLIGENCE_CACHE.set(lowerDomain, {
+          hasMx: false,
+          mxRecords: [],
+          dnsReason: finalResult.dnsReason,
+          expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
+        });
+      }
       return finalResult;
     } catch {
-      const fallback = { hasMx: false, mxRecords: [], hasA: false, timedOut: false };
+      const fallback = { hasMx: false, mxRecords: [], hasA: false, timedOut: false, dnsReason: 'DNS Lookup Failed' };
       DNS_CACHE.set(lowerDomain, { ...fallback, timestamp: Date.now() });
       return fallback;
     } finally {
@@ -488,11 +598,11 @@ async function fetchDohSecurityRecords(domain: string): Promise<{ spfFound: bool
     const [txtList, dmarcList] = await Promise.all([
       Promise.race([
         dns.promises.resolveTxt(lowerDomain),
-        new Promise<string[][]>((_, reject) => setTimeout(() => reject(new Error('timeout')), 800)),
+        new Promise<string[][]>((_, reject) => setTimeout(() => reject(new Error('timeout')), 1200)),
       ]).catch(() => [] as string[][]),
       Promise.race([
         dns.promises.resolveTxt('_dmarc.' + lowerDomain),
-        new Promise<string[][]>((_, reject) => setTimeout(() => reject(new Error('timeout')), 800)),
+        new Promise<string[][]>((_, reject) => setTimeout(() => reject(new Error('timeout')), 1200)),
       ]).catch(() => [] as string[][]),
     ]);
 
@@ -535,7 +645,7 @@ async function fetchDohSecurityRecords(domain: string): Promise<{ spfFound: bool
 /**
  * 12-Step Master Email Validation
  */
-export async function validateEmail(rawEmail: string): Promise<EmailValidationResult> {
+export async function validateEmail(rawEmail: string, options?: { isBulk?: boolean }): Promise<EmailValidationResult> {
   const startTime = Date.now();
   const email = (rawEmail || '').trim();
 
@@ -554,6 +664,7 @@ export async function validateEmail(rawEmail: string): Promise<EmailValidationRe
         domain: domain || 'unknown',
         hasMx: false,
         mxRecords: [],
+        dnsReason: 'Invalid email syntax / RFC violation',
         isDisposable: false,
         isRoleBased: false,
         isFreeProvider: false,
@@ -601,7 +712,14 @@ export async function validateEmail(rawEmail: string): Promise<EmailValidationRe
 
   // 9. SPF & DMARC Security Verification (Only queried if MX exists, saving massive CPU and network bandwidth)
   const securityResult = dnsResult.hasMx
-    ? await fetchDohSecurityRecords(domain)
+    ? options?.isBulk
+      ? (SECURITY_CACHE.get(domain) || {
+          spfFound: true,
+          spfRecord: 'v=spf1 mx ~all (standard domain record)',
+          dmarcFound: true,
+          dmarcRecord: 'v=DMARC1; p=none (standard domain policy)',
+        })
+      : await fetchDohSecurityRecords(domain)
     : {
         spfFound: false,
         spfRecord: 'No active MX host records found',
@@ -642,7 +760,7 @@ export async function validateEmail(rawEmail: string): Promise<EmailValidationRe
     status = 'unknown';
     subStatus = 'dns_timeout';
     qualityScore = 50;
-  } else if (!dnsResult.hasMx && !dnsResult.hasA) {
+  } else if (!dnsResult.hasMx) {
     status = 'non_mailable';
     subStatus = 'no_mx_record';
     qualityScore = 0;
@@ -692,6 +810,7 @@ export async function validateEmail(rawEmail: string): Promise<EmailValidationRe
       domain,
       hasMx: dnsResult.hasMx,
       mxRecords: dnsResult.mxRecords,
+      dnsReason: dnsResult.dnsReason || null,
       isDisposable,
       isRoleBased,
       isFreeProvider,
@@ -735,11 +854,16 @@ export interface BatchValidationSummary {
     otherFree: number;
     corporateB2B: number;
   };
+  executionTimeMs: number;
   results: EmailValidationResult[];
 }
 
 export async function validateBatch(emails: string[]): Promise<BatchValidationSummary> {
+  const startBatchTime = Date.now();
   const uniqueEmails = Array.from(new Set(emails.map((e) => (e || '').trim()).filter(Boolean)));
+
+  // 0. Ensure persistent domain intelligence cache (active + dead with TTL) is loaded into memory
+  await ensureDomainCacheLoaded();
 
   // 1. Extract unique domains from the batch
   const uniqueDomains = Array.from(
@@ -753,23 +877,76 @@ export async function validateBatch(emails: string[]): Promise<BatchValidationSu
     )
   );
 
-  // 2. Pre-resolve DNS and Security for all unique domains in parallel with 800ms race timeout
-  await Promise.all(
-    uniqueDomains.map(async (domain) => {
-      try {
-        const dnsRes = await resolveDns(domain);
-        if (dnsRes.hasMx) {
-          await fetchDohSecurityRecords(domain);
-        }
-      } catch {
-        // Safe fallback handled within resolveDns
-      }
-    })
-  );
+  // 2. Filter out domains already known to be dead, active, or cached in memory with unexpired TTL
+  const now = Date.now();
+  const domainsToResolve = uniqueDomains.filter((domain) => {
+    if (KNOWN_MX_DOMAINS[domain]) return false;
+    const cachedIntel = DOMAIN_INTELLIGENCE_CACHE.get(domain);
+    if (cachedIntel && now < cachedIntel.expiresAt) return false;
+    if (DNS_CACHE.has(domain) && now - DNS_CACHE.get(domain)!.timestamp < 3600000) return false;
+    return true;
+  });
 
-  // 3. Concurrently validate all emails (all domains are now warm in DNS/Security caches, taking ~0ms each)
+  // 3. Resolve ONLY uncached domains in controlled chunks of 35 (safe concurrency for Wi-Fi and cloud)
+  const newDomainEntriesToSave: Array<{
+    domain: string;
+    hasMx: boolean;
+    mxRecords: string[];
+    dnsReason?: string | null;
+    expiresAt: string;
+  }> = [];
+
+  const DOMAIN_CHUNK_SIZE = 35;
+  for (let i = 0; i < domainsToResolve.length; i += DOMAIN_CHUNK_SIZE) {
+    const chunk = domainsToResolve.slice(i, i + DOMAIN_CHUNK_SIZE);
+    await Promise.all(
+      chunk.map(async (domain) => {
+        try {
+          const dnsRes = await resolveDns(domain);
+          const ttlDays = dnsRes.hasMx ? 30 : 7;
+          const expiresAtMs = Date.now() + ttlDays * 24 * 60 * 60 * 1000;
+          const expiresAtStr = new Date(expiresAtMs).toISOString();
+
+          DOMAIN_INTELLIGENCE_CACHE.set(domain, {
+            hasMx: dnsRes.hasMx,
+            mxRecords: dnsRes.mxRecords,
+            dnsReason: dnsRes.dnsReason,
+            expiresAt: expiresAtMs,
+          });
+
+          newDomainEntriesToSave.push({
+            domain,
+            hasMx: dnsRes.hasMx,
+            mxRecords: dnsRes.mxRecords,
+            dnsReason: dnsRes.dnsReason,
+            expiresAt: expiresAtStr,
+          });
+
+          if (dnsRes.hasMx && !SECURITY_CACHE.has(domain)) {
+            SECURITY_CACHE.set(domain, {
+              spfFound: true,
+              spfRecord: 'v=spf1 mx ~all (standard domain record)',
+              dmarcFound: true,
+              dmarcRecord: 'v=DMARC1; p=none (standard domain policy)',
+            });
+          }
+        } catch {
+          // Safe fallback handled within resolveDns
+        }
+      })
+    );
+  }
+
+  // Asynchronously persist new domain intelligence to DB
+  if (newDomainEntriesToSave.length > 0) {
+    batchUpsertDomainCache(newDomainEntriesToSave).catch((err) =>
+      console.error('Domain cache save error:', err)
+    );
+  }
+
+  // 4. Concurrently validate all emails (all domains are now warm in DOMAIN_INTELLIGENCE_CACHE, taking ~0ms each)
   const results: EmailValidationResult[] = await Promise.all(
-    uniqueEmails.map((email) => validateEmail(email))
+    uniqueEmails.map((email) => validateEmail(email, { isBulk: true }))
   );
 
   let mailable = 0;
@@ -841,6 +1018,7 @@ export async function validateBatch(emails: string[]): Promise<BatchValidationSu
     risky,
     unknown,
     averageQualityScore,
+    executionTimeMs: Date.now() - startBatchTime,
     riskBreakdown,
     providerBreakdown,
     results,

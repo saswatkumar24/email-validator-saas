@@ -43,11 +43,21 @@ export interface DbThreatDomain {
   last_verified_at: string;
 }
 
+export interface DbDomainCache {
+  domain: string;
+  has_mx: number;
+  mx_records: string[];
+  dns_reason?: string | null;
+  checked_at: string;
+  expires_at: string;
+}
+
 interface LocalStore {
   users: DbUser[];
   verification_otps: Array<{ id: string; email: string; otp: string; type: string; expires_at: string; created_at: string }>;
   verified_leads: DbLead[];
   threat_domains: DbThreatDomain[];
+  domain_cache?: DbDomainCache[];
   threat_emails: Array<{ email: string; category: string; reported_count: number; last_verified_at: string }>;
   validation_jobs: Array<{
     id: string;
@@ -93,9 +103,7 @@ function getLocalStore(): LocalStore {
 
 let saveTimer: any = null;
 function saveLocalStore(store: LocalStore) {
-  if (saveTimer) {
-    clearTimeout(saveTimer);
-  }
+  if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
     saveTimer = null;
     try {
@@ -168,6 +176,7 @@ function createInitialStore(): LocalStore {
     verification_otps: [],
     verified_leads: [],
     threat_domains: [],
+    domain_cache: [],
     threat_emails: [],
     validation_jobs: [],
   };
@@ -419,6 +428,16 @@ export async function initDb() {
           credits_spent INT DEFAULT 0,
           created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         );
+
+        CREATE TABLE IF NOT EXISTS domain_cache (
+          domain VARCHAR(255) PRIMARY KEY,
+          has_mx SMALLINT NOT NULL DEFAULT 0,
+          mx_records TEXT,
+          dns_reason TEXT,
+          checked_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+          expires_at TIMESTAMP WITH TIME ZONE NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_domain_cache_expires ON domain_cache(expires_at);
       `);
 
       // Seed default accounts
@@ -542,6 +561,22 @@ export async function batchUpsertVerifiedLeads(leads: Array<{
 let leadsIndexMap: Map<string, any> | null = null;
 let threatsIndexMap: Map<string, any> | null = null;
 
+export async function getKnownDeadDomains(): Promise<Set<string>> {
+  await initDb();
+  if (isPostgres) {
+    const res = await query("SELECT domain FROM threat_domains WHERE classification = 'no_mx'");
+    return new Set(res.rows.map((r: any) => (r.domain || '').toLowerCase().trim()).filter(Boolean));
+  } else {
+    const store = getLocalStore();
+    return new Set(
+      store.threat_domains
+        .filter((t) => t.classification === 'no_mx')
+        .map((t) => (t.domain || '').toLowerCase().trim())
+        .filter(Boolean)
+    );
+  }
+}
+
 export async function batchUpsertThreatDomains(threats: Array<{ domain: string; classification: string; reason: string }>) {
   if (!threats || threats.length === 0) return;
   await initDb();
@@ -606,3 +641,95 @@ export async function upsertVerifiedLead(lead: {
 export async function upsertThreatDomain(domain: string, classification: string, reason: string) {
   await batchUpsertThreatDomains([{ domain, classification, reason }]);
 }
+
+let domainCacheIndexMap: Map<string, DbDomainCache> | null = null;
+
+export async function getDomainCacheEntries(): Promise<DbDomainCache[]> {
+  await initDb();
+  if (isPostgres) {
+    const res = await query('SELECT domain, has_mx, mx_records, dns_reason, checked_at, expires_at FROM domain_cache');
+    return res.rows.map((r: any) => ({
+      domain: (r.domain || '').toLowerCase().trim(),
+      has_mx: Number(r.has_mx),
+      mx_records: typeof r.mx_records === 'string' ? JSON.parse(r.mx_records || '[]') : (r.mx_records || []),
+      dns_reason: r.dns_reason || null,
+      checked_at: r.checked_at,
+      expires_at: r.expires_at,
+    }));
+  } else {
+    const store = getLocalStore();
+    if (!store.domain_cache) {
+      store.domain_cache = [];
+    }
+    return store.domain_cache;
+  }
+}
+
+export async function batchUpsertDomainCache(
+  entries: Array<{
+    domain: string;
+    hasMx: boolean;
+    mxRecords: string[];
+    dnsReason?: string | null;
+    expiresAt: string;
+  }>
+) {
+  if (!entries || entries.length === 0) return;
+  await initDb();
+
+  const now = new Date().toISOString();
+
+  if (isPostgres) {
+    for (const item of entries) {
+      const lower = item.domain.toLowerCase().trim();
+      await query(
+        `INSERT INTO domain_cache (domain, has_mx, mx_records, dns_reason, checked_at, expires_at)
+         VALUES (?, ?, ?, ?, NOW(), ?)
+         ON CONFLICT (domain) DO UPDATE SET
+          has_mx = EXCLUDED.has_mx,
+          mx_records = EXCLUDED.mx_records,
+          dns_reason = EXCLUDED.dns_reason,
+          checked_at = NOW(),
+          expires_at = EXCLUDED.expires_at`,
+        [lower, item.hasMx ? 1 : 0, JSON.stringify(item.mxRecords || []), item.dnsReason || null, item.expiresAt]
+      );
+    }
+  } else {
+    const store = getLocalStore();
+    if (!store.domain_cache) {
+      store.domain_cache = [];
+    }
+
+    if (!domainCacheIndexMap) {
+      domainCacheIndexMap = new Map();
+      for (const item of store.domain_cache) {
+        domainCacheIndexMap.set(item.domain, item);
+      }
+    }
+
+    for (const item of entries) {
+      const lower = item.domain.toLowerCase().trim();
+      const existing = domainCacheIndexMap.get(lower);
+      if (existing) {
+        existing.has_mx = item.hasMx ? 1 : 0;
+        existing.mx_records = item.mxRecords || [];
+        existing.dns_reason = item.dnsReason || null;
+        existing.checked_at = now;
+        existing.expires_at = item.expiresAt;
+      } else {
+        const newEntry: DbDomainCache = {
+          domain: lower,
+          has_mx: item.hasMx ? 1 : 0,
+          mx_records: item.mxRecords || [],
+          dns_reason: item.dnsReason || null,
+          checked_at: now,
+          expires_at: item.expiresAt,
+        };
+        store.domain_cache.push(newEntry);
+        domainCacheIndexMap.set(lower, newEntry);
+      }
+    }
+    saveLocalStore(store);
+  }
+}
+

@@ -2,13 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import { validateBatch } from '@/lib/email-engine';
 import { getCurrentUser } from '@/lib/auth';
 import { query, initDb, batchUpsertVerifiedLeads, batchUpsertThreatDomains } from '@/lib/db';
+import { writeBatchRunLog } from '@/lib/logger';
 
 export async function POST(req: NextRequest) {
   try {
     await initDb();
     const user = await getCurrentUser(req);
     const body = await req.json();
-    const { emails, filename } = body;
+    const { emails, filename, runId, batchIndex, totalBatches } = body;
 
     if (!Array.isArray(emails) || emails.length === 0) {
       return NextResponse.json({ error: 'Array of emails is required' }, { status: 400 });
@@ -26,6 +27,36 @@ export async function POST(req: NextRequest) {
 
     // Execute 12-stage validation engine
     const summary = await validateBatch(uniqueRawEmails);
+
+    // Collect dead domains and DNS failure evidence for local run audit logging
+    const noMxMap = new Map<string, { domain: string; dnsReason: string; affectedEmails: string[] }>();
+    for (const item of summary.results) {
+      if (item.subStatus === 'no_mx_record') {
+        const d = item.details.domain;
+        const reason = item.details.dnsReason || item.details.smtpMessage || 'No active MX host records';
+        if (!noMxMap.has(d)) {
+          noMxMap.set(d, { domain: d, dnsReason: reason, affectedEmails: [] });
+        }
+        noMxMap.get(d)!.affectedEmails.push(item.email);
+      }
+    }
+
+    // Write persistent run audit log to logs/<runId>.log and logs/<runId>.json
+    await writeBatchRunLog({
+      runId,
+      jobId: `job_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+      timestamp: new Date().toISOString(),
+      filename: filename || 'bulk_verification.csv',
+      batchIndex: typeof batchIndex === 'number' ? batchIndex : 1,
+      totalBatches: typeof totalBatches === 'number' ? totalBatches : 1,
+      batchEmailCount: uniqueRawEmails.length,
+      durationMs: summary.executionTimeMs || 0,
+      mailableCount: summary.mailable,
+      nonMailableCount: summary.nonMailable,
+      riskyCount: summary.risky,
+      unknownCount: summary.unknown,
+      noMxDomains: Array.from(noMxMap.values()),
+    });
 
     // Asynchronously archive intelligence into DB using high-speed atomic transactions
     (async () => {
