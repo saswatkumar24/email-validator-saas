@@ -263,8 +263,8 @@ export default function TruthMailDashboard() {
     setValidationStatusMsg(`Initiating validation pipeline for ${emailList.length.toLocaleString()} emails...`);
 
     try {
-      // Chunk into sub-batches of 500 emails so browser network stays responsive and never times out
-      const BATCH_SIZE = 500;
+      // Chunk into sub-batches of 250 emails so browser network stays ultra-responsive and never times out
+      const BATCH_SIZE = 250;
       const chunks: string[][] = [];
       for (let i = 0; i < emailList.length; i += BATCH_SIZE) {
         chunks.push(emailList.slice(i, i + BATCH_SIZE));
@@ -305,18 +305,39 @@ export default function TruthMailDashboard() {
           `Scrubbing batch ${c + 1} of ${chunks.length} (${processedSoFar.toLocaleString()} / ${emailList.length.toLocaleString()} emails)...`
         );
 
-        const res = await fetch('/api/validate/batch', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ emails: currentChunk }),
-        });
+        let chunkSummary: BatchValidationSummary | null = null;
+        let lastErr: any = null;
 
-        if (!res.ok) {
-          const errData = await res.json().catch(() => ({}));
-          throw new Error(errData.error || `Failed to validate batch chunk ${c + 1}`);
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            const res = await fetch('/api/validate/batch', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ emails: currentChunk }),
+            });
+
+            if (!res.ok) {
+              const errData = await res.json().catch(() => ({}));
+              throw new Error(errData.error || `Server responded with status ${res.status}`);
+            }
+
+            chunkSummary = await res.json();
+            break;
+          } catch (err: any) {
+            lastErr = err;
+            if (attempt < 3) {
+              setValidationStatusMsg(
+                `Reconnecting batch ${c + 1} of ${chunks.length} (retry ${attempt}/2)...`
+              );
+              await new Promise((r) => setTimeout(r, attempt * 800));
+            }
+          }
         }
 
-        const chunkSummary: BatchValidationSummary = await res.json();
+        if (!chunkSummary) {
+          throw new Error(lastErr?.message || `Failed to validate batch chunk ${c + 1}`);
+        }
+
         aggregatedResults.push(...chunkSummary.results);
         aggregatedMailable += chunkSummary.mailable;
         aggregatedNonMailable += chunkSummary.nonMailable;

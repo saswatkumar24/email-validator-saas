@@ -355,38 +355,40 @@ async function resolveDns(domain: string): Promise<{ hasMx: boolean; mxRecords: 
         return result;
       }
 
-      // Step B: If Node DNS had no records or failed with ESERVFAIL/REFUSED, verify with Google DoH (<80ms worldwide)
-      try {
-        const controller = new AbortController();
-        const dohTimeout = setTimeout(() => controller.abort(), 800);
-        const dohRes = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(lowerDomain)}&type=MX`, {
-          headers: { Accept: 'application/dns-json' },
-          signal: controller.signal,
-        }).then((r) => r.json()).catch(() => null);
-        clearTimeout(dohTimeout);
+      // Step B: Only if Node DNS failed with ESERVFAIL/REFUSED, verify with Google DoH
+      if (nodeDnsFailed) {
+        try {
+          const controller = new AbortController();
+          const dohTimeout = setTimeout(() => controller.abort(), 600);
+          const dohRes = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(lowerDomain)}&type=MX`, {
+            headers: { Accept: 'application/dns-json' },
+            signal: controller.signal,
+          }).then((r) => r.json()).catch(() => null);
+          clearTimeout(dohTimeout);
 
-        if (dohRes) {
-          // Status 2: SERVFAIL (Dead/refusing nameservers, lame delegation e.g. kabinet.cz)
-          // Status 3: NXDOMAIN (Domain does not exist)
-          // Status 0 with no Answer: Domain exists but has no MX
-          if (dohRes.Status === 2 || dohRes.Status === 3 || !dohRes.Answer || dohRes.Answer.length === 0) {
-            const deadResult = { hasMx: false, mxRecords: [], hasA: false, timedOut: false };
-            DNS_CACHE.set(lowerDomain, { ...deadResult, timestamp: Date.now() });
-            return deadResult;
+          if (dohRes) {
+            // Status 2: SERVFAIL (Dead/refusing nameservers, lame delegation e.g. kabinet.cz)
+            // Status 3: NXDOMAIN (Domain does not exist)
+            // Status 0 with no Answer: Domain exists but has no MX
+            if (dohRes.Status === 2 || dohRes.Status === 3 || !dohRes.Answer || dohRes.Answer.length === 0) {
+              const deadResult = { hasMx: false, mxRecords: [], hasA: false, timedOut: false };
+              DNS_CACHE.set(lowerDomain, { ...deadResult, timestamp: Date.now() });
+              return deadResult;
+            }
+
+            const dohMx = (dohRes.Answer || [])
+              .filter((a: any) => a.type === 15)
+              .map((a: any) => (a.data || '').split(' ').pop()?.replace(/\.$/, ''))
+              .filter(Boolean);
+
+            if (dohMx.length > 0) {
+              const result = { hasMx: true, mxRecords: dohMx, hasA: true, timedOut: false };
+              DNS_CACHE.set(lowerDomain, { ...result, timestamp: Date.now() });
+              return result;
+            }
           }
-
-          const dohMx = (dohRes.Answer || [])
-            .filter((a: any) => a.type === 15)
-            .map((a: any) => (a.data || '').split(' ').pop()?.replace(/\.$/, ''))
-            .filter(Boolean);
-
-          if (dohMx.length > 0) {
-            const result = { hasMx: true, mxRecords: dohMx, hasA: true, timedOut: false };
-            DNS_CACHE.set(lowerDomain, { ...result, timestamp: Date.now() });
-            return result;
-          }
-        }
-      } catch {}
+        } catch {}
+      }
 
       // Concluded: Domain has no active MX records
       const finalResult = { hasMx: false, mxRecords: [], hasA: false, timedOut: false };
@@ -469,7 +471,7 @@ const KNOWN_SECURITY_RECORDS: Record<string, { spfFound: boolean; spfRecord: str
   },
 };
 
-// Free DNS-over-HTTPS (DoH) REST API Query for live SPF and DMARC verification
+// Live SPF and DMARC verification using fast native DNS TXT records with in-memory caching
 async function fetchDohSecurityRecords(domain: string): Promise<{ spfFound: boolean; spfRecord: string | null; dmarcFound: boolean; dmarcRecord: string | null }> {
   const lowerDomain = domain.toLowerCase().trim();
   if (KNOWN_SECURITY_RECORDS[lowerDomain]) {
@@ -479,36 +481,34 @@ async function fetchDohSecurityRecords(domain: string): Promise<{ spfFound: bool
     return SECURITY_CACHE.get(lowerDomain)!;
   }
 
+  let spfRecord: string | null = null;
+  let dmarcRecord: string | null = null;
+
   try {
-    const spfUrl = `https://dns.google/resolve?name=${encodeURIComponent(lowerDomain)}&type=TXT`;
-    const dmarcUrl = `https://dns.google/resolve?name=${encodeURIComponent('_dmarc.' + lowerDomain)}&type=TXT`;
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 1000);
-
-    const [spfRes, dmarcRes] = await Promise.all([
-      fetch(spfUrl, { signal: controller.signal, headers: { Accept: 'application/dns-json' } }).then((r) => r.json()).catch(() => null),
-      fetch(dmarcUrl, { signal: controller.signal, headers: { Accept: 'application/dns-json' } }).then((r) => r.json()).catch(() => null),
+    const [txtList, dmarcList] = await Promise.all([
+      Promise.race([
+        dns.promises.resolveTxt(lowerDomain),
+        new Promise<string[][]>((_, reject) => setTimeout(() => reject(new Error('timeout')), 800)),
+      ]).catch(() => [] as string[][]),
+      Promise.race([
+        dns.promises.resolveTxt('_dmarc.' + lowerDomain),
+        new Promise<string[][]>((_, reject) => setTimeout(() => reject(new Error('timeout')), 800)),
+      ]).catch(() => [] as string[][]),
     ]);
-    clearTimeout(timeout);
 
-    let spfRecord: string | null = null;
-    if (spfRes && Array.isArray(spfRes.Answer)) {
-      for (const ans of spfRes.Answer) {
-        if (typeof ans.data === 'string' && ans.data.includes('v=spf1')) {
-          spfRecord = ans.data.replace(/^"|"$/g, '');
-          break;
-        }
+    for (const group of txtList) {
+      const joined = Array.isArray(group) ? group.join('') : String(group);
+      if (joined.includes('v=spf1')) {
+        spfRecord = joined;
+        break;
       }
     }
 
-    let dmarcRecord: string | null = null;
-    if (dmarcRes && Array.isArray(dmarcRes.Answer)) {
-      for (const ans of dmarcRes.Answer) {
-        if (typeof ans.data === 'string' && ans.data.includes('v=DMARC1')) {
-          dmarcRecord = ans.data.replace(/^"|"$/g, '');
-          break;
-        }
+    for (const group of dmarcList) {
+      const joined = Array.isArray(group) ? group.join('') : String(group);
+      if (joined.includes('v=DMARC1')) {
+        dmarcRecord = joined;
+        break;
       }
     }
 

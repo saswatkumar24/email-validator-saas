@@ -93,7 +93,9 @@ function getLocalStore(): LocalStore {
 
 let saveTimer: any = null;
 function saveLocalStore(store: LocalStore) {
-  if (saveTimer) return;
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+  }
   saveTimer = setTimeout(async () => {
     saveTimer = null;
     try {
@@ -101,7 +103,7 @@ function saveLocalStore(store: LocalStore) {
     } catch (err) {
       console.error('Failed to save local store:', err);
     }
-  }, 500);
+  }, 1500);
 }
 
 function createInitialStore(): LocalStore {
@@ -500,15 +502,22 @@ export async function batchUpsertVerifiedLeads(leads: Array<{
     const store = getLocalStore();
     const now = new Date().toISOString();
 
+    if (!leadsIndexMap) {
+      leadsIndexMap = new Map();
+      for (const item of store.verified_leads) {
+        leadsIndexMap.set(item.canonical_email, item);
+      }
+    }
+
     for (const lead of leads) {
       const { canonical } = canonicalizeEmail(lead.rawEmail);
-      const existing = store.verified_leads.find((x) => x.canonical_email === canonical);
+      const existing = leadsIndexMap.get(canonical);
       if (existing) {
         existing.times_seen += 1;
         existing.last_verified_at = now;
         existing.quality_score = lead.qualityScore;
       } else {
-        store.verified_leads.push({
+        const newLead = {
           id: `lead_${Date.now()}_${Math.random().toString(36).substring(7)}`,
           canonical_email: canonical,
           raw_email: lead.rawEmail,
@@ -521,12 +530,17 @@ export async function batchUpsertVerifiedLeads(leads: Array<{
           times_seen: 1,
           first_verified_at: now,
           last_verified_at: now,
-        });
+        };
+        store.verified_leads.push(newLead);
+        leadsIndexMap.set(canonical, newLead);
       }
     }
     saveLocalStore(store);
   }
 }
+
+let leadsIndexMap: Map<string, any> | null = null;
+let threatsIndexMap: Map<string, any> | null = null;
 
 export async function batchUpsertThreatDomains(threats: Array<{ domain: string; classification: string; reason: string }>) {
   if (!threats || threats.length === 0) return;
@@ -548,20 +562,29 @@ export async function batchUpsertThreatDomains(threats: Array<{ domain: string; 
     const store = getLocalStore();
     const now = new Date().toISOString();
 
+    if (!threatsIndexMap) {
+      threatsIndexMap = new Map();
+      for (const item of store.threat_domains) {
+        threatsIndexMap.set(item.domain, item);
+      }
+    }
+
     for (const t of threats) {
       const lower = t.domain.toLowerCase().trim();
-      const existing = store.threat_domains.find((x) => x.domain === lower);
+      const existing = threatsIndexMap.get(lower);
       if (existing) {
         existing.times_seen += 1;
         existing.last_verified_at = now;
       } else {
-        store.threat_domains.push({
+        const newThreat = {
           domain: lower,
           classification: t.classification,
           reason: t.reason,
           times_seen: 1,
           last_verified_at: now,
-        });
+        };
+        store.threat_domains.push(newThreat);
+        threatsIndexMap.set(lower, newThreat);
       }
     }
     saveLocalStore(store);
