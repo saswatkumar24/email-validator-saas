@@ -21,6 +21,10 @@ export async function ensureDomainCacheLoaded() {
     const entries = await getDomainCacheEntries();
     const now = Date.now();
     for (const e of entries) {
+      // Safeguard: Never restore transient timeouts or SERVFAIL as dead domains
+      if (e.has_mx === 0 && (e.dns_reason?.includes('TIMEOUT') || e.dns_reason?.includes('SERVFAIL') || e.dns_reason?.includes('Failed'))) {
+        continue;
+      }
       const exp = new Date(e.expires_at).getTime();
       if (exp > now) {
         DOMAIN_INTELLIGENCE_CACHE.set(e.domain.toLowerCase().trim(), {
@@ -31,19 +35,6 @@ export async function ensureDomainCacheLoaded() {
         });
       }
     }
-    // Backward compatibility: load legacy dead domains (7-day TTL)
-    const deadSet = await getKnownDeadDomains();
-    deadSet.forEach((d) => {
-      const lower = d.toLowerCase().trim();
-      if (!DOMAIN_INTELLIGENCE_CACHE.has(lower)) {
-        DOMAIN_INTELLIGENCE_CACHE.set(lower, {
-          hasMx: false,
-          mxRecords: [],
-          dnsReason: 'KNOWN_DEAD_CACHE (Previously confirmed inactive domain)',
-          expiresAt: now + 7 * 24 * 60 * 60 * 1000,
-        });
-      }
-    });
     isDomainCacheLoaded = true;
   } catch (err) {
     // Non-blocking fallback
@@ -399,7 +390,9 @@ async function resolveDns(domain: string): Promise<{ hasMx: boolean; mxRecords: 
           new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 3500)),
         ]);
         mxList.sort((a, b) => a.priority - b.priority);
-        mxRecords = mxList.map((r) => r.exchange);
+        mxRecords = mxList
+          .map((r) => (r.exchange || '').trim().replace(/\.$/, ''))
+          .filter((m) => Boolean(m) && m !== '.' && m !== '0');
       } catch (err: any) {
         nodeDnsFailed = true;
         if (err.code === 'ENOTFOUND') failureReason = 'ENOTFOUND (Domain does not exist in DNS)';
@@ -433,7 +426,7 @@ async function resolveDns(domain: string): Promise<{ hasMx: boolean; mxRecords: 
       // Step B: Authoritative verification via Google DNS-over-HTTPS (DoH) over reliable HTTPS
       try {
         const controller = new AbortController();
-        const dohTimeout = setTimeout(() => controller.abort(), 2000);
+        const dohTimeout = setTimeout(() => controller.abort(), 3500);
         const dohRes = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(lowerDomain)}&type=MX`, {
           headers: { Accept: 'application/dns-json' },
           signal: controller.signal,
@@ -443,8 +436,8 @@ async function resolveDns(domain: string): Promise<{ hasMx: boolean; mxRecords: 
         if (dohRes) {
           const dohMx = (dohRes.Answer || [])
             .filter((a: any) => a.type === 15)
-            .map((a: any) => (a.data || '').split(' ').pop()?.replace(/\.$/, ''))
-            .filter(Boolean);
+            .map((a: any) => (a.data || '').split(' ').pop()?.replace(/\.$/, '').trim())
+            .filter((m: string) => Boolean(m) && m !== '.' && m !== '0');
 
           if (dohMx.length > 0) {
             const result = { hasMx: true, mxRecords: dohMx, hasA: true, timedOut: false };
@@ -482,16 +475,22 @@ async function resolveDns(domain: string): Promise<{ hasMx: boolean; mxRecords: 
             });
             return deadResult;
           }
+
+          // Status 2 is SERVFAIL (Temporary nameserver failure)
+          if (dohRes.Status === 2) {
+            failureReason = 'ESERVFAIL (Authoritative nameserver returned SERVFAIL)';
+          }
         }
       } catch {}
 
       // Step C: Conclude with failure reason, but ONLY cache as permanently dead if authoritatively proven
-      const isAuthoritativeDead = failureReason.includes('ENOTFOUND') || failureReason.includes('ENODATA');
+      const isTransientFailure = failureReason.includes('TIMEOUT') || failureReason.includes('ESERVFAIL') || failureReason.includes('SERVFAIL');
+      const isAuthoritativeDead = !isTransientFailure && (failureReason.includes('ENOTFOUND') || failureReason.includes('ENODATA'));
       const finalResult = {
         hasMx: false,
         mxRecords: [],
         hasA: false,
-        timedOut: failureReason.includes('TIMEOUT'),
+        timedOut: isTransientFailure,
         dnsReason: failureReason,
       };
       DNS_CACHE.set(lowerDomain, { ...finalResult, timestamp: Date.now() });
@@ -505,7 +504,7 @@ async function resolveDns(domain: string): Promise<{ hasMx: boolean; mxRecords: 
       }
       return finalResult;
     } catch {
-      const fallback = { hasMx: false, mxRecords: [], hasA: false, timedOut: false, dnsReason: 'DNS Lookup Failed' };
+      const fallback = { hasMx: false, mxRecords: [], hasA: false, timedOut: true, dnsReason: 'DNS Lookup Failed' };
       DNS_CACHE.set(lowerDomain, { ...fallback, timestamp: Date.now() });
       return fallback;
     } finally {
@@ -903,6 +902,19 @@ export async function validateBatch(emails: string[]): Promise<BatchValidationSu
       chunk.map(async (domain) => {
         try {
           const dnsRes = await resolveDns(domain);
+
+          // Safeguard: Never cache temporary network timeouts or transient nameserver errors into persistent intelligence
+          if (dnsRes.timedOut) {
+            return;
+          }
+          if (!dnsRes.hasMx) {
+            const r = dnsRes.dnsReason || '';
+            const isProvenDead = r.includes('ENOTFOUND') || r.includes('ENODATA') || r.includes('NXDOMAIN') || r.includes('NO_MX_PUBLISHED') || r.includes('INVALID_DOMAIN_SYNTAX');
+            if (!isProvenDead) {
+              return;
+            }
+          }
+
           const ttlDays = dnsRes.hasMx ? 30 : 7;
           const expiresAtMs = Date.now() + ttlDays * 24 * 60 * 60 * 1000;
           const expiresAtStr = new Date(expiresAtMs).toISOString();

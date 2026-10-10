@@ -84,11 +84,15 @@ export async function POST(req: NextRequest) {
               hasDmarc: item.details.dmarcFound,
             });
           } else if (item.subStatus === 'no_mx_record') {
-            threatsToSave.push({
-              domain: item.details.domain,
-              classification: 'no_mx',
-              reason: item.details.smtpMessage || 'No active MX host records',
-            });
+            const reason = item.details.dnsReason || '';
+            const isProvenDead = reason.includes('ENOTFOUND') || reason.includes('ENODATA') || reason.includes('NXDOMAIN') || reason.includes('NO_MX_PUBLISHED') || reason.includes('INVALID_DOMAIN_SYNTAX');
+            if (isProvenDead) {
+              threatsToSave.push({
+                domain: item.details.domain,
+                classification: 'no_mx',
+                reason: reason || 'No active MX host records',
+              });
+            }
           } else if (item.subStatus === 'spam_trap_detected') {
             threatsToSave.push({
               domain: item.details.domain,
