@@ -6,7 +6,11 @@ import { writeBatchRunLog } from '@/lib/logger';
 
 export async function POST(req: NextRequest) {
   try {
-    await initDb();
+    try {
+      await initDb();
+    } catch (dbInitErr) {
+      console.warn('Database init skipped in batch route:', dbInitErr);
+    }
     const user = await getCurrentUser(req);
     const body = await req.json();
     const { emails, filename, runId, batchIndex, totalBatches } = body;
@@ -20,9 +24,13 @@ export async function POST(req: NextRequest) {
 
     // Seamless Demo/Test Credit Handling: Auto-replenish if testing so batches never get stuck!
     if (user && user.creditsBalance < uniqueRawEmails.length) {
-      const replenished = user.creditsBalance + 100000;
-      await query('UPDATE users SET credits_balance = ? WHERE id = ?', [replenished, user.id]);
-      user.creditsBalance = replenished;
+      try {
+        const replenished = user.creditsBalance + 100000;
+        await query('UPDATE users SET credits_balance = ? WHERE id = ?', [replenished, user.id]);
+        user.creditsBalance = replenished;
+      } catch (err) {
+        console.warn('Credits replenishment failed non-fatally:', err);
+      }
     }
 
     // Execute 12-stage validation engine
@@ -116,25 +124,29 @@ export async function POST(req: NextRequest) {
     // Deduct credits and log validation job
     let remainingCredits = user ? Math.max(0, user.creditsBalance - uniqueRawEmails.length) : 100000;
     if (user) {
-      await query('UPDATE users SET credits_balance = ? WHERE id = ?', [remainingCredits, user.id]);
-      const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-      await query(
-        `INSERT INTO validation_jobs (
-          id, user_id, filename, total_emails, mailable_count, non_mailable_count, 
-          risky_count, unknown_count, credits_spent
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          jobId,
-          user.id,
-          filename || 'bulk_verification.csv',
-          uniqueRawEmails.length,
-          summary.mailable,
-          summary.nonMailable,
-          summary.risky,
-          summary.unknown,
-          uniqueRawEmails.length,
-        ]
-      );
+      try {
+        await query('UPDATE users SET credits_balance = ? WHERE id = ?', [remainingCredits, user.id]);
+        const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+        await query(
+          `INSERT INTO validation_jobs (
+            id, user_id, filename, total_emails, mailable_count, non_mailable_count, 
+            risky_count, unknown_count, credits_spent
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            jobId,
+            user.id,
+            filename || 'bulk_verification.csv',
+            uniqueRawEmails.length,
+            summary.mailable,
+            summary.nonMailable,
+            summary.risky,
+            summary.unknown,
+            uniqueRawEmails.length,
+          ]
+        );
+      } catch (logErr) {
+        console.warn('Logging job or updating credits failed non-fatally:', logErr);
+      }
     }
 
     return NextResponse.json({

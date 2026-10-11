@@ -75,7 +75,8 @@ interface LocalStore {
 
 let pgPool: any = null;
 let memoryStore: LocalStore | null = null;
-const isPostgres = Boolean(process.env.DATABASE_URL);
+let isPostgres = Boolean(process.env.DATABASE_URL);
+let isPostgresHealthy = true;
 
 const STORE_PATH = path.join(process.cwd(), 'data', 'truthmail_store.json');
 
@@ -188,19 +189,26 @@ function getPgPool() {
     pgPool = new Pool({
       connectionString: process.env.DATABASE_URL,
       ssl: process.env.DATABASE_URL?.includes('localhost') ? false : { rejectUnauthorized: false },
+      connectionTimeoutMillis: 3000,
     });
   }
   return pgPool;
 }
 
 export async function query(sql: string, params: any[] = []): Promise<{ rows: any[] }> {
-  if (isPostgres) {
-    const pool = getPgPool();
-    let pSql = sql;
-    let paramIndex = 1;
-    pSql = pSql.replace(/\?/g, () => `$${paramIndex++}`);
-    const res = await pool.query(pSql, params);
-    return { rows: res.rows };
+  if (isPostgres && isPostgresHealthy) {
+    try {
+      const pool = getPgPool();
+      let pSql = sql;
+      let paramIndex = 1;
+      pSql = pSql.replace(/\?/g, () => `$${paramIndex++}`);
+      const res = await pool.query(pSql, params);
+      return { rows: res.rows };
+    } catch (pgErr: any) {
+      console.warn(`[DB] Remote PostgreSQL query failed (${pgErr?.code || pgErr?.message}). Falling back to local persistent store.`);
+      isPostgresHealthy = false;
+      // Intentionally fall through to Local Pure-JS Query Handler below
+    }
   }
 
   // Local Pure-JS Query Handler
@@ -361,7 +369,7 @@ let initialized = false;
 export async function initDb() {
   if (initialized) return;
 
-  if (isPostgres) {
+  if (isPostgres && isPostgresHealthy) {
     try {
       await query(`
         CREATE TABLE IF NOT EXISTS users (
@@ -450,10 +458,14 @@ export async function initDb() {
           ['user_admin_001', 'TruthMail Admin', 'admin@truthmail.com', adminPassHash]
         );
       }
-    } catch (err) {
-      console.error('PostgreSQL init error:', err);
+    } catch (err: any) {
+      console.warn(`[DB] PostgreSQL init skipped or unreachable (${err?.message || err}). Falling back to local store.`);
+      isPostgresHealthy = false;
+      getLocalStore();
     }
-  } else {
+  }
+
+  if (!isPostgres || !isPostgresHealthy) {
     // Pure JS local storage auto-loads
     getLocalStore();
   }
@@ -492,7 +504,7 @@ export async function batchUpsertVerifiedLeads(leads: Array<{
   if (!leads || leads.length === 0) return;
   await initDb();
 
-  if (isPostgres) {
+  if (isPostgres && isPostgresHealthy) {
     for (const lead of leads) {
       const { canonical } = canonicalizeEmail(lead.rawEmail);
       await query(
@@ -517,7 +529,9 @@ export async function batchUpsertVerifiedLeads(leads: Array<{
         ]
       );
     }
-  } else {
+  }
+
+  if (!isPostgres || !isPostgresHealthy) {
     const store = getLocalStore();
     const now = new Date().toISOString();
 
@@ -563,25 +577,28 @@ let threatsIndexMap: Map<string, any> | null = null;
 
 export async function getKnownDeadDomains(): Promise<Set<string>> {
   await initDb();
-  if (isPostgres) {
-    const res = await query("SELECT domain FROM threat_domains WHERE classification = 'no_mx'");
-    return new Set(res.rows.map((r: any) => (r.domain || '').toLowerCase().trim()).filter(Boolean));
-  } else {
-    const store = getLocalStore();
-    return new Set(
-      store.threat_domains
-        .filter((t) => t.classification === 'no_mx')
-        .map((t) => (t.domain || '').toLowerCase().trim())
-        .filter(Boolean)
-    );
+  if (isPostgres && isPostgresHealthy) {
+    try {
+      const res = await query("SELECT domain FROM threat_domains WHERE classification = 'no_mx'");
+      return new Set(res.rows.map((r: any) => (r.domain || '').toLowerCase().trim()).filter(Boolean));
+    } catch {
+      // Fallback handled below
+    }
   }
+  const store = getLocalStore();
+  return new Set(
+    store.threat_domains
+      .filter((t) => t.classification === 'no_mx')
+      .map((t) => (t.domain || '').toLowerCase().trim())
+      .filter(Boolean)
+  );
 }
 
 export async function batchUpsertThreatDomains(threats: Array<{ domain: string; classification: string; reason: string }>) {
   if (!threats || threats.length === 0) return;
   await initDb();
 
-  if (isPostgres) {
+  if (isPostgres && isPostgresHealthy) {
     for (const t of threats) {
       const lower = t.domain.toLowerCase().trim();
       await query(
@@ -593,7 +610,9 @@ export async function batchUpsertThreatDomains(threats: Array<{ domain: string; 
         [lower, t.classification, t.reason]
       );
     }
-  } else {
+  }
+  
+  if (!isPostgres || !isPostgresHealthy) {
     const store = getLocalStore();
     const now = new Date().toISOString();
 
@@ -646,23 +665,27 @@ let domainCacheIndexMap: Map<string, DbDomainCache> | null = null;
 
 export async function getDomainCacheEntries(): Promise<DbDomainCache[]> {
   await initDb();
-  if (isPostgres) {
-    const res = await query('SELECT domain, has_mx, mx_records, dns_reason, checked_at, expires_at FROM domain_cache');
-    return res.rows.map((r: any) => ({
-      domain: (r.domain || '').toLowerCase().trim(),
-      has_mx: Number(r.has_mx),
-      mx_records: typeof r.mx_records === 'string' ? JSON.parse(r.mx_records || '[]') : (r.mx_records || []),
-      dns_reason: r.dns_reason || null,
-      checked_at: r.checked_at,
-      expires_at: r.expires_at,
-    }));
-  } else {
-    const store = getLocalStore();
-    if (!store.domain_cache) {
-      store.domain_cache = [];
+  if (isPostgres && isPostgresHealthy) {
+    try {
+      const res = await query('SELECT domain, has_mx, mx_records, dns_reason, checked_at, expires_at FROM domain_cache');
+      return res.rows.map((r: any) => ({
+        domain: (r.domain || '').toLowerCase().trim(),
+        has_mx: Number(r.has_mx),
+        mx_records: typeof r.mx_records === 'string' ? JSON.parse(r.mx_records || '[]') : (r.mx_records || []),
+        dns_reason: r.dns_reason || null,
+        checked_at: r.checked_at,
+        expires_at: r.expires_at,
+      }));
+    } catch {
+      // Fallback handled below
     }
-    return store.domain_cache;
   }
+
+  const store = getLocalStore();
+  if (!store.domain_cache) {
+    store.domain_cache = [];
+  }
+  return store.domain_cache;
 }
 
 export async function batchUpsertDomainCache(
@@ -679,7 +702,7 @@ export async function batchUpsertDomainCache(
 
   const now = new Date().toISOString();
 
-  if (isPostgres) {
+  if (isPostgres && isPostgresHealthy) {
     for (const item of entries) {
       const lower = item.domain.toLowerCase().trim();
       await query(
@@ -694,7 +717,9 @@ export async function batchUpsertDomainCache(
         [lower, item.hasMx ? 1 : 0, JSON.stringify(item.mxRecords || []), item.dnsReason || null, item.expiresAt]
       );
     }
-  } else {
+  }
+
+  if (!isPostgres || !isPostgresHealthy) {
     const store = getLocalStore();
     if (!store.domain_cache) {
       store.domain_cache = [];
