@@ -3,7 +3,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import Link from 'next/link';
 import AuthModal from '@/components/AuthModal';
+import EvidenceDrawer from '@/components/EvidenceDrawer';
+import RecentJobsCenter, { RecentJobItem } from '@/components/RecentJobsCenter';
 import {
+  LayoutDashboard,
   ShieldCheck,
   UploadCloud,
   FileText,
@@ -33,7 +36,12 @@ import {
   ArrowRight,
   Table,
   CheckCheck,
-  FileSpreadsheet
+  FileSpreadsheet,
+  BarChart3,
+  SlidersHorizontal,
+  Clock,
+  Eye,
+  X
 } from 'lucide-react';
 import { SAMPLE_BENCHMARK_EMAILS, SAMPLE_CSV_CONTENT } from '@/lib/sample-data';
 import { EmailValidationResult, BatchValidationSummary } from '@/lib/email-engine';
@@ -48,14 +56,40 @@ interface UploadedSheetInfo {
   previewRows: Record<string, string>[];
 }
 
+export type TabType = 'dashboard' | 'verify' | 'deliverability' | 'reports' | 'api' | 'billing';
+
 export default function TruthMailDashboard() {
-  // Navigation tabs
-  const [activeTab, setActiveTab] = useState<'bulk' | 'report' | 'single' | 'greymail' | 'pricing' | 'api'>('bulk');
+  // Unified 6-section navigation tabs
+  const [activeTab, setActiveTab] = useState<TabType>('dashboard');
+  const [verifySubTab, setVerifySubTab] = useState<'bulk' | 'single'>('bulk');
+  const [drilldownSubStatus, setDrilldownSubStatus] = useState<string | null>(null);
 
   // SaaS Credits State
   const [credits, setCredits] = useState<number>(100000);
   const [topUpModalOpen, setTopUpModalOpen] = useState(false);
   const [topUpCredits, setTopUpCredits] = useState<number>(10000);
+
+  // Recent Jobs Center State
+  const [recentJobs, setRecentJobs] = useState<RecentJobItem[]>([]);
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem('truthmail_recent_jobs');
+      if (stored) {
+        setRecentJobs(JSON.parse(stored));
+      }
+    } catch {}
+  }, []);
+
+  const saveRecentJob = (newJob: RecentJobItem) => {
+    setRecentJobs((prev) => {
+      const updated = [newJob, ...prev.filter((j) => j.id !== newJob.id)].slice(0, 10);
+      try {
+        localStorage.setItem('truthmail_recent_jobs', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+  };
 
   // Authentication State
   const [currentUser, setCurrentUser] = useState<any>(null);
@@ -389,7 +423,18 @@ export default function TruthMailDashboard() {
         setReportData(finalSummary);
         setCredits((prev) => Math.max(0, prev - finalSummary.total));
         setIsValidating(false);
-        setActiveTab('report');
+        setActiveTab('reports');
+        saveRecentJob({
+          id: `job_${Date.now()}`,
+          filename: uploadedSheet?.name || 'bulk_verification.csv',
+          totalEmails: finalSummary.total,
+          mailable: finalSummary.mailable,
+          nonMailable: finalSummary.nonMailable,
+          risky: finalSummary.risky,
+          unknown: finalSummary.unknown,
+          avgScore: finalSummary.averageQualityScore,
+          timestamp: new Date().toISOString(),
+        });
       }, 300);
     } catch (err: any) {
       alert('Validation Error: ' + err.message);
@@ -421,12 +466,27 @@ export default function TruthMailDashboard() {
     }
   };
 
-  // Filter Table Results
+  // Filter Table Results with Interactive Metric & Risk Drill-down
   const filteredResults = (reportData?.results || []).filter((item) => {
     if (tableFilter !== 'all' && item.status !== tableFilter) return false;
+    if (drilldownSubStatus) {
+      if (drilldownSubStatus === 'spam_trap' && !item.details.isSpamTrap && item.subStatus !== 'spam_trap_detected') return false;
+      else if (drilldownSubStatus === 'disposable' && !item.details.isDisposable && item.subStatus !== 'disposable_address') return false;
+      else if (drilldownSubStatus === 'catch_all' && !item.details.isCatchAll && item.subStatus !== 'catch_all_domain') return false;
+      else if (drilldownSubStatus === 'role_based' && !item.details.isRoleBased && item.subStatus !== 'role_based_account') return false;
+      else if (drilldownSubStatus === 'greymail' && !item.details.isGreymail && item.subStatus !== 'greymail_identified') return false;
+      else if (drilldownSubStatus === 'typo' && !item.details.didYouMean && item.subStatus !== 'typo_detected') return false;
+      else if (drilldownSubStatus === 'no_mx' && (item.details.hasMx || item.subStatus !== 'no_mx_record')) return false;
+      else if (drilldownSubStatus === 'invalid_syntax' && (item.details.syntaxValid || item.subStatus !== 'invalid_syntax')) return false;
+      else if (!['spam_trap', 'disposable', 'catch_all', 'role_based', 'greymail', 'typo', 'no_mx', 'invalid_syntax'].includes(drilldownSubStatus) && item.subStatus !== drilldownSubStatus) return false;
+    }
     if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      return item.email.toLowerCase().includes(q) || item.details.domain.toLowerCase().includes(q);
+      const q = searchQuery.toLowerCase().trim();
+      return (
+        item.email.toLowerCase().includes(q) ||
+        item.details.domain.toLowerCase().includes(q) ||
+        item.subStatus.toLowerCase().includes(q)
+      );
     }
     return true;
   });
@@ -496,13 +556,50 @@ export default function TruthMailDashboard() {
     downloadCSV(rows, `esp_suppression_list_${Date.now()}.csv`);
   };
 
+  const exportFilteredResults = () => {
+    if (!reportData || filteredResults.length === 0) return;
+    const rows = [
+      [
+        'Email',
+        'Status',
+        'Sub Status',
+        'Quality Score',
+        'Domain',
+        'MX Record',
+        'SMTP Code',
+        'Is Disposable',
+        'Is Spam Trap',
+        'Is Greymail',
+        'Is Role Based',
+        'Suggested Typo',
+      ],
+    ];
+    filteredResults.forEach((r) => {
+      rows.push([
+        r.email,
+        r.status,
+        r.subStatus,
+        r.qualityScore.toString(),
+        r.details.domain,
+        r.details.mxRecords[0] || (r.details.dnsReason ? `[${r.details.dnsReason}]` : 'None'),
+        r.details.smtpCode,
+        r.details.isDisposable ? 'YES' : 'NO',
+        r.details.isSpamTrap ? 'YES' : 'NO',
+        r.details.isGreymail ? 'YES' : 'NO',
+        r.details.isRoleBased ? 'YES' : 'NO',
+        r.details.didYouMean || 'None',
+      ]);
+    });
+    downloadCSV(rows, `truthmail_filtered_leads_${Date.now()}.csv`);
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
       {/* Top Navigation */}
       <header className="border-b border-slate-800 bg-slate-900/90 backdrop-blur-md sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           {/* Logo & Brand */}
-          <div className="flex items-center space-x-3 cursor-pointer" onClick={() => setActiveTab('bulk')}>
+          <div className="flex items-center space-x-3 cursor-pointer" onClick={() => setActiveTab('dashboard')}>
             <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-700 flex items-center justify-center shadow-lg shadow-emerald-500/20">
               <ShieldCheck className="w-6 h-6 text-white" />
             </div>
@@ -517,69 +614,88 @@ export default function TruthMailDashboard() {
             </div>
           </div>
 
-          {/* Navigation Links */}
-          <nav className="hidden md:flex items-center space-x-1">
+          {/* Navigation Links - 6 Clean Workspaces */}
+          <nav className="hidden lg:flex items-center space-x-1">
             <button
-              onClick={() => setActiveTab('bulk')}
-              className={`px-3.5 py-2 rounded-lg text-sm font-medium transition-colors flex items-center space-x-2 ${
-                activeTab === 'bulk' ? 'bg-slate-800 text-emerald-400 font-semibold' : 'text-slate-300 hover:text-white hover:bg-slate-800/50'
+              onClick={() => setActiveTab('dashboard')}
+              className={`px-3 py-2 rounded-lg text-xs font-medium transition-colors flex items-center space-x-1.5 ${
+                activeTab === 'dashboard'
+                  ? 'bg-slate-800 text-emerald-400 font-semibold'
+                  : 'text-slate-300 hover:text-white hover:bg-slate-800/50'
               }`}
             >
-              <UploadCloud className="w-4 h-4" />
-              <span>Bulk Verifier</span>
+              <LayoutDashboard className="w-4 h-4" />
+              <span>Dashboard</span>
             </button>
 
             <button
-              onClick={() => setActiveTab('report')}
-              className={`px-3.5 py-2 rounded-lg text-sm font-medium transition-colors flex items-center space-x-2 ${
-                activeTab === 'report' ? 'bg-slate-800 text-emerald-400 font-semibold' : 'text-slate-300 hover:text-white hover:bg-slate-800/50'
+              onClick={() => {
+                setActiveTab('verify');
+                setVerifySubTab('bulk');
+              }}
+              className={`px-3 py-2 rounded-lg text-xs font-medium transition-colors flex items-center space-x-1.5 ${
+                activeTab === 'verify'
+                  ? 'bg-slate-800 text-emerald-400 font-semibold'
+                  : 'text-slate-300 hover:text-white hover:bg-slate-800/50'
               }`}
             >
-              <TrendingUp className="w-4 h-4" />
-              <span>Report & Analytics</span>
+              <UploadCloud className="w-4 h-4" />
+              <span>Email Verification</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('deliverability')}
+              className={`px-3 py-2 rounded-lg text-xs font-medium transition-colors flex items-center space-x-1.5 ${
+                activeTab === 'deliverability'
+                  ? 'bg-slate-800 text-emerald-400 font-semibold'
+                  : 'text-slate-300 hover:text-white hover:bg-slate-800/50'
+              }`}
+            >
+              <ShieldCheck className="w-4 h-4" />
+              <span>Deliverability</span>
+            </button>
+
+            <button
+              onClick={() => {
+                setActiveTab('reports');
+                setTableFilter('all');
+                setDrilldownSubStatus(null);
+              }}
+              className={`px-3 py-2 rounded-lg text-xs font-medium transition-colors flex items-center space-x-1.5 ${
+                activeTab === 'reports'
+                  ? 'bg-slate-800 text-emerald-400 font-semibold'
+                  : 'text-slate-300 hover:text-white hover:bg-slate-800/50'
+              }`}
+            >
+              <BarChart3 className="w-4 h-4" />
+              <span>Insights & Reports</span>
               {reportData && (
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
               )}
             </button>
 
             <button
-              onClick={() => setActiveTab('single')}
-              className={`px-3.5 py-2 rounded-lg text-sm font-medium transition-colors flex items-center space-x-2 ${
-                activeTab === 'single' ? 'bg-slate-800 text-emerald-400 font-semibold' : 'text-slate-300 hover:text-white hover:bg-slate-800/50'
-              }`}
-            >
-              <Zap className="w-4 h-4" />
-              <span>Single Sandbox</span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab('greymail')}
-              className={`px-3.5 py-2 rounded-lg text-sm font-medium transition-colors flex items-center space-x-2 ${
-                activeTab === 'greymail' ? 'bg-slate-800 text-emerald-400 font-semibold' : 'text-slate-300 hover:text-white hover:bg-slate-800/50'
-              }`}
-            >
-              <Info className="w-4 h-4" />
-              <span>Greymail Guide</span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab('pricing')}
-              className={`px-3.5 py-2 rounded-lg text-sm font-medium transition-colors flex items-center space-x-2 ${
-                activeTab === 'pricing' ? 'bg-slate-800 text-emerald-400 font-semibold' : 'text-slate-300 hover:text-white hover:bg-slate-800/50'
-              }`}
-            >
-              <CreditCard className="w-4 h-4" />
-              <span>Pricing Tiers</span>
-            </button>
-
-            <button
               onClick={() => setActiveTab('api')}
-              className={`px-3.5 py-2 rounded-lg text-sm font-medium transition-colors flex items-center space-x-2 ${
-                activeTab === 'api' ? 'bg-slate-800 text-emerald-400 font-semibold' : 'text-slate-300 hover:text-white hover:bg-slate-800/50'
+              className={`px-3 py-2 rounded-lg text-xs font-medium transition-colors flex items-center space-x-1.5 ${
+                activeTab === 'api'
+                  ? 'bg-slate-800 text-emerald-400 font-semibold'
+                  : 'text-slate-300 hover:text-white hover:bg-slate-800/50'
               }`}
             >
               <Code2 className="w-4 h-4" />
-              <span>API</span>
+              <span>Integrations & API</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('billing')}
+              className={`px-3 py-2 rounded-lg text-xs font-medium transition-colors flex items-center space-x-1.5 ${
+                activeTab === 'billing'
+                  ? 'bg-slate-800 text-emerald-400 font-semibold'
+                  : 'text-slate-300 hover:text-white hover:bg-slate-800/50'
+              }`}
+            >
+              <CreditCard className="w-4 h-4" />
+              <span>Settings & Billing</span>
             </button>
           </nav>
 
@@ -643,37 +759,266 @@ export default function TruthMailDashboard() {
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
 
-        {/* 1. BULK LIST VERIFIER VIEW */}
-        {activeTab === 'bulk' && (
+        {/* 1. DASHBOARD OVERVIEW WORKSPACE */}
+        {activeTab === 'dashboard' && (
           <div className="space-y-8">
-            {/* Header intro */}
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-800">
+            {/* Dashboard Welcome Header */}
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-6 border-b border-slate-800">
               <div>
-                <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
-                  Bulk Email Validation & Scrubbing
-                </h1>
+                <div className="flex items-center space-x-2.5">
+                  <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+                    Deliverability Intelligence Hub
+                  </h1>
+                  <span className="text-xs bg-emerald-950 text-emerald-400 border border-emerald-800/80 px-2.5 py-0.5 rounded-full font-semibold">
+                    Live System
+                  </span>
+                </div>
                 <p className="text-slate-400 text-sm mt-1">
-                  Upload your spreadsheet (.xlsx, .csv, .txt, .tsv). Our 12-step engine checks MX, spam traps, hard bounces, typos, and greymails.
+                  Enterprise email validation, bounce suppression, and domain reputation monitoring.
                 </p>
               </div>
 
-              <div className="flex items-center space-x-3">
+              <div className="flex flex-wrap items-center gap-2.5">
                 <button
-                  onClick={handleDownloadTemplate}
-                  className="px-3.5 py-2 text-xs font-medium text-slate-300 bg-slate-900 border border-slate-700 rounded-lg hover:bg-slate-800 transition flex items-center space-x-1.5"
+                  onClick={() => {
+                    setActiveTab('verify');
+                    setVerifySubTab('bulk');
+                  }}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-xl transition shadow-md shadow-emerald-600/20 flex items-center space-x-2"
                 >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>Download Sample CSV</span>
+                  <UploadCloud className="w-4 h-4" />
+                  <span>Verify Email List</span>
                 </button>
+
+                <button
+                  onClick={() => {
+                    setActiveTab('verify');
+                    setVerifySubTab('single');
+                  }}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-semibold text-xs rounded-xl transition flex items-center space-x-2"
+                >
+                  <Zap className="w-4 h-4 text-emerald-400" />
+                  <span>Single Sandbox</span>
+                </button>
+
                 <button
                   onClick={handleLoadSample}
-                  className="px-4 py-2 text-xs font-semibold text-emerald-400 bg-emerald-950/80 border border-emerald-800 rounded-lg hover:bg-emerald-900 transition flex items-center space-x-1.5 shadow-sm"
+                  className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 font-medium text-xs rounded-xl transition flex items-center space-x-1.5"
                 >
-                  <Zap className="w-3.5 h-3.5" />
-                  <span>Load 25 Benchmark Emails</span>
+                  <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Load Benchmark (4,678 Leads)</span>
                 </button>
               </div>
             </div>
+
+            {/* Quick Metrics Bar */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-2 relative overflow-hidden">
+                <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center space-x-1.5">
+                  <CheckCheck className="w-4 h-4 text-emerald-400" />
+                  <span>Total Verified</span>
+                </span>
+                <div className="text-3xl font-extrabold text-white font-mono">
+                  {reportData ? reportData.total.toLocaleString() : (recentJobs[0]?.totalEmails || 0).toLocaleString()}
+                </div>
+                <p className="text-[11px] text-slate-400">Unique leads validated through 12-step pipeline</p>
+              </div>
+
+              <div className="bg-slate-900/80 border border-emerald-900/40 rounded-2xl p-5 space-y-2 relative overflow-hidden">
+                <span className="text-xs font-semibold uppercase tracking-wider text-emerald-400 flex items-center space-x-1.5">
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>Clean Mailable Rate</span>
+                </span>
+                <div className="text-3xl font-extrabold text-emerald-400 font-mono">
+                  {reportData ? `${Math.round((reportData.mailable / reportData.total) * 100)}%` : recentJobs[0] ? `${Math.round((recentJobs[0].mailable / recentJobs[0].totalEmails) * 100)}%` : '95%+'}
+                </div>
+                <p className="text-[11px] text-slate-400">Guaranteed inbox deliverability threshold</p>
+              </div>
+
+              <div className="bg-slate-900/80 border border-rose-900/40 rounded-2xl p-5 space-y-2 relative overflow-hidden">
+                <span className="text-xs font-semibold uppercase tracking-wider text-rose-400 flex items-center space-x-1.5">
+                  <XCircle className="w-4 h-4" />
+                  <span>Bounces Suppressed</span>
+                </span>
+                <div className="text-3xl font-extrabold text-rose-400 font-mono">
+                  {reportData ? reportData.nonMailable.toLocaleString() : (recentJobs[0]?.nonMailable || 0).toLocaleString()}
+                </div>
+                <p className="text-[11px] text-slate-400">Hard bounces & toxic spam traps blocked</p>
+              </div>
+
+              <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-2 relative overflow-hidden">
+                <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center space-x-1.5">
+                  <CreditCard className="w-4 h-4 text-emerald-400" />
+                  <span>Credits Available</span>
+                </span>
+                <div className="text-3xl font-extrabold text-white font-mono">
+                  {credits.toLocaleString()}
+                </div>
+                <p className="text-[11px] text-slate-400">Non-expiring verification balance</p>
+              </div>
+            </div>
+
+            {/* Quick Action Navigation Cards */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+              <div
+                onClick={() => {
+                  setActiveTab('verify');
+                  setVerifySubTab('bulk');
+                }}
+                className="group bg-slate-900/60 hover:bg-slate-900 border border-slate-800 hover:border-emerald-500/50 p-6 rounded-2xl cursor-pointer transition shadow-lg space-y-3"
+              >
+                <div className="w-12 h-12 rounded-xl bg-emerald-950/80 border border-emerald-800/80 flex items-center justify-center text-emerald-400 group-hover:scale-105 transition">
+                  <UploadCloud className="w-6 h-6" />
+                </div>
+                <h3 className="text-base font-bold text-white flex items-center justify-between">
+                  <span>Bulk List Verifier</span>
+                  <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 group-hover:translate-x-1 transition" />
+                </h3>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Clean 5k, 10k, or 50k+ leads from CSV or XLSX. Automatically maps email columns and scrubs dead domains in seconds.
+                </p>
+              </div>
+
+              <div
+                onClick={() => {
+                  setActiveTab('verify');
+                  setVerifySubTab('single');
+                }}
+                className="group bg-slate-900/60 hover:bg-slate-900 border border-slate-800 hover:border-emerald-500/50 p-6 rounded-2xl cursor-pointer transition shadow-lg space-y-3"
+              >
+                <div className="w-12 h-12 rounded-xl bg-slate-800 border border-slate-700/80 flex items-center justify-center text-emerald-400 group-hover:scale-105 transition">
+                  <Zap className="w-6 h-6" />
+                </div>
+                <h3 className="text-base font-bold text-white flex items-center justify-between">
+                  <span>Single Sandbox</span>
+                  <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 group-hover:translate-x-1 transition" />
+                </h3>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Instantly simulate live SMTP handshakes, test SPF/DMARC policies, and check typo suggestions for individual leads.
+                </p>
+              </div>
+
+              <div
+                onClick={() => {
+                  setActiveTab('reports');
+                  setTableFilter('all');
+                  setDrilldownSubStatus(null);
+                }}
+                className="group bg-slate-900/60 hover:bg-slate-900 border border-slate-800 hover:border-emerald-500/50 p-6 rounded-2xl cursor-pointer transition shadow-lg space-y-3"
+              >
+                <div className="w-12 h-12 rounded-xl bg-slate-800 border border-slate-700/80 flex items-center justify-center text-emerald-400 group-hover:scale-105 transition">
+                  <BarChart3 className="w-6 h-6" />
+                </div>
+                <h3 className="text-base font-bold text-white flex items-center justify-between">
+                  <span>Insights & Reports</span>
+                  <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 group-hover:translate-x-1 transition" />
+                </h3>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Deep deliverability breakdowns, provider distribution, interactive risk filters, and 1-click clean list exports.
+                </p>
+              </div>
+            </div>
+
+            {/* Recent Jobs Center */}
+            <div className="space-y-3">
+              <RecentJobsCenter
+                jobs={recentJobs}
+                onSelectJob={() => {
+                  setActiveTab('reports');
+                }}
+                onClearJobs={() => {
+                  setRecentJobs([]);
+                  try {
+                    localStorage.removeItem('truthmail_recent_jobs');
+                  } catch {}
+                }}
+                onDownloadJob={(job, type) => {
+                  if (reportData) {
+                    if (type === 'clean') exportCleanOnly();
+                    else exportFullAudit();
+                  } else {
+                    setActiveTab('reports');
+                  }
+                }}
+                onQuickUpload={() => {
+                  setActiveTab('verify');
+                  setVerifySubTab('bulk');
+                }}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* 2. EMAIL VERIFICATION WORKSPACE (Unified Bulk & Single) */}
+        {activeTab === 'verify' && (
+          <div className="space-y-6">
+            {/* Sub-Switch Bar */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
+              <div className="flex items-center space-x-2 bg-slate-900/90 p-1 rounded-xl border border-slate-800/80">
+                <button
+                  onClick={() => setVerifySubTab('bulk')}
+                  className={`px-4 py-2 rounded-lg text-xs font-semibold transition flex items-center space-x-2 ${
+                    verifySubTab === 'bulk'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/20'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+                  }`}
+                >
+                  <UploadCloud className="w-4 h-4" />
+                  <span>Bulk Spreadsheets (.csv, .xlsx, .tsv)</span>
+                </button>
+                <button
+                  onClick={() => setVerifySubTab('single')}
+                  className={`px-4 py-2 rounded-lg text-xs font-semibold transition flex items-center space-x-2 ${
+                    verifySubTab === 'single'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/20'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+                  }`}
+                >
+                  <Zap className="w-4 h-4" />
+                  <span>Single Real-Time Sandbox</span>
+                </button>
+              </div>
+
+              {verifySubTab === 'bulk' && (
+                <div className="flex items-center space-x-2">
+                  <button
+                    onClick={handleDownloadTemplate}
+                    className="px-3 py-1.5 text-xs text-slate-300 bg-slate-900 border border-slate-800 rounded-lg hover:bg-slate-800 transition flex items-center space-x-1"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>CSV Template</span>
+                  </button>
+                  <button
+                    onClick={handleLoadSample}
+                    className="px-3 py-1.5 text-xs font-semibold text-emerald-400 bg-emerald-950/70 border border-emerald-800 rounded-lg hover:bg-emerald-900 transition flex items-center space-x-1"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Load 4,678 Sample</span>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {verifySubTab === 'bulk' && (
+              <div className="space-y-8">
+                {/* Header intro */}
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-2">
+                  <div>
+                    <h2 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight">
+                      Bulk Email Validation & Scrubbing
+                    </h2>
+                    <p className="text-slate-400 text-xs sm:text-sm mt-1">
+                      Upload your spreadsheet (.xlsx, .csv, .txt, .tsv). Our 12-step engine checks MX, spam traps, hard bounces, typos, and greymails.
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleLoadSample}
+                    className="px-4 py-2 text-xs font-semibold text-emerald-400 bg-emerald-950/80 border border-emerald-800 rounded-lg hover:bg-emerald-900 transition flex items-center space-x-1.5 shadow-sm"
+                  >
+                    <Zap className="w-3.5 h-3.5" />
+                    <span>Load 25 Benchmark Emails</span>
+                  </button>
+                </div>
 
             {/* Validation Process In Flight */}
             {isValidating && (
@@ -999,458 +1344,8 @@ export default function TruthMailDashboard() {
           </div>
         )}
 
-        {/* 2. REPORT & ANALYTICS VIEW */}
-        {activeTab === 'report' && (
-          <div className="space-y-8">
-            {!reportData ? (
-              <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-12 text-center space-y-4">
-                <div className="w-14 h-14 rounded-2xl bg-slate-800 border border-slate-700 flex items-center justify-center mx-auto text-slate-400">
-                  <FileText className="w-7 h-7" />
-                </div>
-                <h3 className="text-lg font-bold text-white">No Validation Report Available Yet</h3>
-                <p className="text-slate-400 text-sm max-w-md mx-auto">
-                  Upload a sheet or run our 25-email benchmark test to generate an enterprise deliverability report.
-                </p>
-                <button
-                  onClick={() => { handleLoadSample(); setActiveTab('bulk'); }}
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition"
-                >
-                  Load Benchmark Dataset
-                </button>
-              </div>
-            ) : (
-              <div className="space-y-8">
-                {/* Header with Export buttons */}
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-800">
-                  <div>
-                    <div className="flex items-center space-x-2">
-                      <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
-                        Deliverability & Risk Intelligence Report
-                      </h1>
-                      <span className="text-xs bg-emerald-950 text-emerald-400 border border-emerald-800 px-2.5 py-0.5 rounded-full font-semibold">
-                        Scrub Complete
-                      </span>
-                    </div>
-                    <p className="text-slate-400 text-sm mt-1">
-                      Processed <strong>{reportData.total}</strong> unique email addresses • Average Quality Score: <strong className="text-emerald-400">{reportData.averageQualityScore}/100</strong>
-                    </p>
-                  </div>
-
-                  {/* Export Options */}
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      onClick={exportCleanOnly}
-                      className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-lg transition shadow-md shadow-emerald-600/20 flex items-center space-x-1.5"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      <span>Export Clean Only ({reportData.mailable})</span>
-                    </button>
-                    <button
-                      onClick={exportFullAudit}
-                      className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-semibold text-xs rounded-lg transition flex items-center space-x-1.5"
-                    >
-                      <FileText className="w-3.5 h-3.5" />
-                      <span>Full Audit Report</span>
-                    </button>
-                    <button
-                      onClick={exportSuppressionList}
-                      className="px-3.5 py-2 bg-rose-950 hover:bg-rose-900 border border-rose-800 text-rose-300 font-semibold text-xs rounded-lg transition flex items-center space-x-1.5"
-                    >
-                      <AlertOctagon className="w-3.5 h-3.5" />
-                      <span>ESP Suppression List</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* Top 4 KPI Cards */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                  {/* Mailable */}
-                  <div className="bg-slate-900/80 border border-emerald-500/30 rounded-2xl p-5 space-y-3 relative overflow-hidden">
-                    <div className="absolute top-0 right-0 w-24 h-24 bg-emerald-500/10 rounded-full blur-2xl pointer-events-none" />
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold uppercase tracking-wider text-emerald-400 flex items-center space-x-1.5">
-                        <CheckCircle2 className="w-4 h-4" />
-                        <span>Mailable (Valid)</span>
-                      </span>
-                      <span className="text-xs font-mono font-bold bg-emerald-950 text-emerald-400 border border-emerald-800/80 px-2 py-0.5 rounded">
-                        {Math.round((reportData.mailable / reportData.total) * 100)}%
-                      </span>
-                    </div>
-                    <div className="text-3xl font-extrabold text-white font-mono">{reportData.mailable}</div>
-                    <p className="text-[11px] text-slate-400">100% safe to send. Verified mailbox with active MX.</p>
-                  </div>
-
-                  {/* Non-Mailable */}
-                  <div className="bg-slate-900/80 border border-rose-500/30 rounded-2xl p-5 space-y-3 relative overflow-hidden">
-                    <div className="absolute top-0 right-0 w-24 h-24 bg-rose-500/10 rounded-full blur-2xl pointer-events-none" />
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold uppercase tracking-wider text-rose-400 flex items-center space-x-1.5">
-                        <XCircle className="w-4 h-4" />
-                        <span>Non-Mailable</span>
-                      </span>
-                      <span className="text-xs font-mono font-bold bg-rose-950 text-rose-400 border border-rose-800/80 px-2 py-0.5 rounded">
-                        {Math.round((reportData.nonMailable / reportData.total) * 100)}%
-                      </span>
-                    </div>
-                    <div className="text-3xl font-extrabold text-white font-mono">{reportData.nonMailable}</div>
-                    <p className="text-[11px] text-slate-400">Hard bounces avoided. Invalid syntax or dead MX records.</p>
-                  </div>
-
-                  {/* Risky */}
-                  <div className="bg-slate-900/80 border border-amber-500/30 rounded-2xl p-5 space-y-3 relative overflow-hidden">
-                    <div className="absolute top-0 right-0 w-24 h-24 bg-amber-500/10 rounded-full blur-2xl pointer-events-none" />
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold uppercase tracking-wider text-amber-400 flex items-center space-x-1.5">
-                        <AlertTriangle className="w-4 h-4" />
-                        <span>Risky Emails</span>
-                      </span>
-                      <span className="text-xs font-mono font-bold bg-amber-950 text-amber-400 border border-amber-800/80 px-2 py-0.5 rounded">
-                        {Math.round((reportData.risky / reportData.total) * 100)}%
-                      </span>
-                    </div>
-                    <div className="text-3xl font-extrabold text-white font-mono">{reportData.risky}</div>
-                    <p className="text-[11px] text-slate-400">Catch-all, disposable, role accounts, or greymail.</p>
-                  </div>
-
-                  {/* Unknown */}
-                  <div className="bg-slate-900/80 border border-slate-700/80 rounded-2xl p-5 space-y-3 relative overflow-hidden">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center space-x-1.5">
-                        <HelpCircle className="w-4 h-4" />
-                        <span>Unknown</span>
-                      </span>
-                      <span className="text-xs font-mono font-bold bg-slate-800 text-slate-400 border border-slate-700 px-2 py-0.5 rounded">
-                        {Math.round((reportData.unknown / reportData.total) * 100)}%
-                      </span>
-                    </div>
-                    <div className="text-3xl font-extrabold text-white font-mono">{reportData.unknown}</div>
-                    <p className="text-[11px] text-slate-400">Server timeouts. Credits auto-refunded back to balance.</p>
-                  </div>
-                </div>
-
-                {/* Middle Grid: Detailed Risk Breakdown & Provider Matrix */}
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-                  {/* Granular Risk Breakdown (8 Cols) */}
-                  <div className="lg:col-span-8 bg-slate-900/60 border border-slate-800 rounded-2xl p-6 space-y-5">
-                    <div className="flex items-center justify-between">
-                      <h3 className="text-base font-bold text-white flex items-center space-x-2">
-                        <AlertTriangle className="w-4 h-4 text-amber-400" />
-                        <span>Granular Risk Factors & Threats Detected</span>
-                      </h3>
-                      <span className="text-xs text-slate-400">Protecting Domain Sender Score</span>
-                    </div>
-
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                      {/* Spam Traps */}
-                      <div className="bg-slate-950/80 border border-rose-900/60 rounded-xl p-3.5 space-y-1">
-                        <span className="text-[11px] font-semibold text-rose-400 flex items-center space-x-1">
-                          <Flame className="w-3 h-3" />
-                          <span>Spam Traps</span>
-                        </span>
-                        <div className="text-2xl font-mono font-bold text-white">{reportData.riskBreakdown.spamTraps}</div>
-                        <p className="text-[10px] text-slate-400">Toxic blacklists avoided</p>
-                      </div>
-
-                      {/* Greymail */}
-                      <div className="bg-slate-950/80 border border-amber-900/60 rounded-xl p-3.5 space-y-1 cursor-pointer hover:border-amber-700 transition" onClick={() => setActiveTab('greymail')}>
-                        <span className="text-[11px] font-semibold text-amber-400 flex items-center space-x-1">
-                          <Info className="w-3 h-3" />
-                          <span>Greymail</span>
-                        </span>
-                        <div className="text-2xl font-mono font-bold text-white">{reportData.riskBreakdown.greymail}</div>
-                        <p className="text-[10px] text-slate-400">Low engagement lists</p>
-                      </div>
-
-                      {/* Disposable */}
-                      <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5 space-y-1">
-                        <span className="text-[11px] font-semibold text-slate-300 flex items-center space-x-1">
-                          <Trash2 className="w-3 h-3" />
-                          <span>Disposable</span>
-                        </span>
-                        <div className="text-2xl font-mono font-bold text-white">{reportData.riskBreakdown.disposable}</div>
-                        <p className="text-[10px] text-slate-400">Temporary burners</p>
-                      </div>
-
-                      {/* Catch-All */}
-                      <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5 space-y-1">
-                        <span className="text-[11px] font-semibold text-slate-300 flex items-center space-x-1">
-                          <Layers className="w-3 h-3" />
-                          <span>Catch-All</span>
-                        </span>
-                        <div className="text-2xl font-mono font-bold text-white">{reportData.riskBreakdown.catchAll}</div>
-                        <p className="text-[10px] text-slate-400">Accept-all servers</p>
-                      </div>
-
-                      {/* Role Accounts */}
-                      <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5 space-y-1">
-                        <span className="text-[11px] font-semibold text-slate-300">Role-Based</span>
-                        <div className="text-2xl font-mono font-bold text-white">{reportData.riskBreakdown.roleBased}</div>
-                        <p className="text-[10px] text-slate-400">admin@, support@, info@</p>
-                      </div>
-
-                      {/* Typo suggestions */}
-                      <div className="bg-slate-950/80 border border-emerald-900/60 rounded-xl p-3.5 space-y-1">
-                        <span className="text-[11px] font-semibold text-emerald-400">Typos Fixed</span>
-                        <div className="text-2xl font-mono font-bold text-white">{reportData.riskBreakdown.typos}</div>
-                        <p className="text-[10px] text-slate-400">e.g. gamil → gmail</p>
-                      </div>
-
-                      {/* Missing MX */}
-                      <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5 space-y-1">
-                        <span className="text-[11px] font-semibold text-slate-300">Missing MX</span>
-                        <div className="text-2xl font-mono font-bold text-white">{reportData.riskBreakdown.missingMx}</div>
-                        <p className="text-[10px] text-slate-400">No mail exchanger</p>
-                      </div>
-
-                      {/* Syntax errors */}
-                      <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5 space-y-1">
-                        <span className="text-[11px] font-semibold text-slate-300">Syntax Errors</span>
-                        <div className="text-2xl font-mono font-bold text-white">{reportData.riskBreakdown.syntaxErrors}</div>
-                        <p className="text-[10px] text-slate-400">RFC 5322 noncompliant</p>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Mailbox Provider Composition (4 Cols) */}
-                  <div className="lg:col-span-4 bg-slate-900/60 border border-slate-800 rounded-2xl p-6 space-y-5">
-                    <h3 className="text-base font-bold text-white flex items-center space-x-2">
-                      <Server className="w-4 h-4 text-emerald-400" />
-                      <span>Provider Distribution</span>
-                    </h3>
-
-                    <div className="space-y-3">
-                      <div>
-                        <div className="flex justify-between text-xs mb-1">
-                          <span className="text-slate-300">Google Workspace / Gmail</span>
-                          <span className="font-mono text-emerald-400">{reportData.providerBreakdown.google}</span>
-                        </div>
-                        <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
-                          <div
-                            className="bg-emerald-500 h-full rounded-full"
-                            style={{ width: `${(reportData.providerBreakdown.google / reportData.total) * 100}%` }}
-                          />
-                        </div>
-                      </div>
-
-                      <div>
-                        <div className="flex justify-between text-xs mb-1">
-                          <span className="text-slate-300">Microsoft 365 / Outlook</span>
-                          <span className="font-mono text-blue-400">{reportData.providerBreakdown.microsoft}</span>
-                        </div>
-                        <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
-                          <div
-                            className="bg-blue-500 h-full rounded-full"
-                            style={{ width: `${(reportData.providerBreakdown.microsoft / reportData.total) * 100}%` }}
-                          />
-                        </div>
-                      </div>
-
-                      <div>
-                        <div className="flex justify-between text-xs mb-1">
-                          <span className="text-slate-300">Corporate Custom B2B</span>
-                          <span className="font-mono text-purple-400">{reportData.providerBreakdown.corporateB2B}</span>
-                        </div>
-                        <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
-                          <div
-                            className="bg-purple-500 h-full rounded-full"
-                            style={{ width: `${(reportData.providerBreakdown.corporateB2B / reportData.total) * 100}%` }}
-                          />
-                        </div>
-                      </div>
-
-                      <div>
-                        <div className="flex justify-between text-xs mb-1">
-                          <span className="text-slate-300">Yahoo & Other Free</span>
-                          <span className="font-mono text-amber-400">
-                            {reportData.providerBreakdown.yahoo + reportData.providerBreakdown.otherFree}
-                          </span>
-                        </div>
-                        <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
-                          <div
-                            className="bg-amber-500 h-full rounded-full"
-                            style={{
-                              width: `${((reportData.providerBreakdown.yahoo + reportData.providerBreakdown.otherFree) / reportData.total) * 100}%`,
-                            }}
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="bg-slate-950/70 border border-slate-800/80 rounded-xl p-3 text-[11px] text-slate-400">
-                      💡 <strong>ESP Deliverability Tip:</strong> Maintain a 0.3% maximum bounce rate to adhere to Google & Yahoo's 2024+ sender authentication policies.
-                    </div>
-                  </div>
-                </div>
-
-                {/* Filterable Data Table */}
-                <div className="bg-slate-900/60 border border-slate-800 rounded-2xl overflow-hidden space-y-4 p-5">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                    {/* Filter buttons */}
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <button
-                        onClick={() => setTableFilter('all')}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                          tableFilter === 'all' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white bg-slate-800/50'
-                        }`}
-                      >
-                        All ({reportData.total})
-                      </button>
-                      <button
-                        onClick={() => setTableFilter('mailable')}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                          tableFilter === 'mailable' ? 'bg-emerald-600 text-white' : 'text-emerald-400 hover:bg-emerald-950/50'
-                        }`}
-                      >
-                        Mailable ({reportData.mailable})
-                      </button>
-                      <button
-                        onClick={() => setTableFilter('non_mailable')}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                          tableFilter === 'non_mailable' ? 'bg-rose-600 text-white' : 'text-rose-400 hover:bg-rose-950/50'
-                        }`}
-                      >
-                        Non-Mailable ({reportData.nonMailable})
-                      </button>
-                      <button
-                        onClick={() => setTableFilter('risky')}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                          tableFilter === 'risky' ? 'bg-amber-600 text-white' : 'text-amber-400 hover:bg-amber-950/50'
-                        }`}
-                      >
-                        Risky ({reportData.risky})
-                      </button>
-                      <button
-                        onClick={() => setTableFilter('unknown')}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                          tableFilter === 'unknown' ? 'bg-slate-600 text-white' : 'text-slate-400 hover:bg-slate-800/50'
-                        }`}
-                      >
-                        Unknown ({reportData.unknown})
-                      </button>
-                    </div>
-
-                    {/* Search box */}
-                    <div className="relative min-w-[240px]">
-                      <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
-                      <input
-                        type="text"
-                        placeholder="Search email or domain..."
-                        value={searchQuery}
-                        onChange={(e) => setSearchQuery(e.target.value)}
-                        className="w-full pl-9 pr-3 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200 focus:outline-none focus:border-emerald-500"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Table */}
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left text-xs">
-                      <thead className="bg-slate-950/80 text-slate-400 border-b border-slate-800 uppercase tracking-wider text-[10px]">
-                        <tr>
-                          <th className="py-3 px-4">Email Address</th>
-                          <th className="py-3 px-4">Primary Status</th>
-                          <th className="py-3 px-4">Sub-Status</th>
-                          <th className="py-3 px-4">Score</th>
-                          <th className="py-3 px-4">MX Record</th>
-                          <th className="py-3 px-4">Risk Flags</th>
-                          <th className="py-3 px-4 text-right">Inspect</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-800/60 font-mono text-[11px]">
-                        {filteredResults.map((item, idx) => (
-                          <tr key={idx} className="hover:bg-slate-800/40 transition">
-                            <td className="py-3 px-4 font-semibold text-slate-200">
-                              {item.email}
-                              {item.details.didYouMean && (
-                                <span className="block text-[10px] text-emerald-400 font-sans mt-0.5">
-                                  💡 Did you mean: <strong>{item.details.didYouMean}</strong>?
-                                </span>
-                              )}
-                            </td>
-                            <td className="py-3 px-4">
-                              <span
-                                className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
-                                  item.status === 'mailable'
-                                    ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
-                                    : item.status === 'non_mailable'
-                                    ? 'bg-rose-950 text-rose-400 border border-rose-800'
-                                    : item.status === 'risky'
-                                    ? 'bg-amber-950 text-amber-400 border border-amber-800'
-                                    : 'bg-slate-800 text-slate-400 border border-slate-700'
-                                }`}
-                              >
-                                {item.status}
-                              </span>
-                            </td>
-                            <td className="py-3 px-4 text-slate-300 font-sans">
-                              {item.subStatus.replace(/_/g, ' ')}
-                            </td>
-                            <td className="py-3 px-4 font-bold">
-                              <span
-                                className={
-                                  item.qualityScore >= 80
-                                    ? 'text-emerald-400'
-                                    : item.qualityScore >= 50
-                                    ? 'text-amber-400'
-                                    : 'text-rose-400'
-                                }
-                              >
-                                {item.qualityScore}
-                              </span>
-                            </td>
-                            <td className="py-3 px-4 text-slate-400 truncate max-w-[160px]">
-                              {item.details.mxRecords[0] || 'None'}
-                            </td>
-                            <td className="py-3 px-4">
-                              <div className="flex flex-wrap gap-1 font-sans">
-                                {item.details.isSpamTrap && (
-                                  <span className="bg-rose-950 text-rose-400 border border-rose-800 px-1.5 py-0.2 rounded text-[9px]">
-                                    Spam Trap
-                                  </span>
-                                )}
-                                {item.details.isGreymail && (
-                                  <span className="bg-amber-950 text-amber-400 border border-amber-800 px-1.5 py-0.2 rounded text-[9px]">
-                                    Greymail
-                                  </span>
-                                )}
-                                {item.details.isDisposable && (
-                                  <span className="bg-slate-800 text-slate-300 px-1.5 py-0.2 rounded text-[9px]">
-                                    Disposable
-                                  </span>
-                                )}
-                                {item.details.isRoleBased && (
-                                  <span className="bg-purple-950 text-purple-300 px-1.5 py-0.2 rounded text-[9px]">
-                                    Role
-                                  </span>
-                                )}
-                                {item.details.isCatchAll && (
-                                  <span className="bg-blue-950 text-blue-300 px-1.5 py-0.2 rounded text-[9px]">
-                                    Catch-All
-                                  </span>
-                                )}
-                              </div>
-                            </td>
-                            <td className="py-3 px-4 text-right">
-                              <button
-                                onClick={() => setSelectedEmailDetail(item)}
-                                className="px-2.5 py-1 text-[11px] bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-sans transition"
-                              >
-                                View
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* 3. SINGLE EMAIL SANDBOX VIEW */}
-        {activeTab === 'single' && (
+        {/* Unified Verification: Single Sandbox */}
+        {verifySubTab === 'single' && (
           <div className="max-w-4xl mx-auto space-y-8">
             <div className="text-center space-y-2">
               <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
@@ -1641,9 +1536,651 @@ export default function TruthMailDashboard() {
             )}
           </div>
         )}
+      </div>
+    )}
 
-        {/* 4. GREYMAIL INTELLIGENCE GUIDE */}
-        {activeTab === 'greymail' && (
+    {/* 4. INSIGHTS & REPORTS WORKSPACE */}
+    {activeTab === 'reports' && (
+          <div className="space-y-8">
+            {!reportData ? (
+              <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-12 text-center space-y-4">
+                <div className="w-14 h-14 rounded-2xl bg-slate-800 border border-slate-700 flex items-center justify-center mx-auto text-slate-400">
+                  <FileText className="w-7 h-7" />
+                </div>
+                <h3 className="text-lg font-bold text-white">No Validation Report Available Yet</h3>
+                <p className="text-slate-400 text-sm max-w-md mx-auto">
+                  Upload a sheet or run our 25-email benchmark test to generate an enterprise deliverability report.
+                </p>
+                <button
+                  onClick={() => {
+                    handleLoadSample();
+                    setActiveTab('verify');
+                    setVerifySubTab('bulk');
+                  }}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition"
+                >
+                  Load Benchmark Dataset
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-8">
+                {/* Header with Export buttons */}
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-800">
+                  <div>
+                    <div className="flex items-center space-x-2">
+                      <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+                        Deliverability & Risk Intelligence Report
+                      </h1>
+                      <span className="text-xs bg-emerald-950 text-emerald-400 border border-emerald-800 px-2.5 py-0.5 rounded-full font-semibold">
+                        Scrub Complete
+                      </span>
+                    </div>
+                    <p className="text-slate-400 text-sm mt-1">
+                      Processed <strong>{reportData.total}</strong> unique email addresses • Average Quality Score: <strong className="text-emerald-400">{reportData.averageQualityScore}/100</strong>
+                    </p>
+                  </div>
+
+                  {/* Export Options */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={exportCleanOnly}
+                      className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-lg transition shadow-md shadow-emerald-600/20 flex items-center space-x-1.5"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Export Clean Only ({reportData.mailable})</span>
+                    </button>
+                    <button
+                      onClick={exportFullAudit}
+                      className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-semibold text-xs rounded-lg transition flex items-center space-x-1.5"
+                    >
+                      <FileText className="w-3.5 h-3.5" />
+                      <span>Full Audit Report</span>
+                    </button>
+                    <button
+                      onClick={exportSuppressionList}
+                      className="px-3.5 py-2 bg-rose-950 hover:bg-rose-900 border border-rose-800 text-rose-300 font-semibold text-xs rounded-lg transition flex items-center space-x-1.5"
+                    >
+                      <AlertOctagon className="w-3.5 h-3.5" />
+                      <span>ESP Suppression List</span>
+                    </button>
+                    {(tableFilter !== 'all' || drilldownSubStatus || searchQuery.trim()) && (
+                      <button
+                        onClick={exportFilteredResults}
+                        className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs rounded-lg transition shadow-md shadow-indigo-600/20 flex items-center space-x-1.5"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>Export Filtered ({filteredResults.length})</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Top 4 KPI Cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {/* Mailable */}
+                  <div
+                    onClick={() => {
+                      setTableFilter(tableFilter === 'mailable' && !drilldownSubStatus ? 'all' : 'mailable');
+                      setDrilldownSubStatus(null);
+                    }}
+                    className={`bg-slate-900/80 border rounded-2xl p-5 space-y-3 relative overflow-hidden cursor-pointer transition hover:scale-[1.01] ${
+                      tableFilter === 'mailable' && !drilldownSubStatus
+                        ? 'border-emerald-500 ring-2 ring-emerald-500/30'
+                        : 'border-emerald-500/30 hover:border-emerald-500/70'
+                    }`}
+                  >
+                    <div className="absolute top-0 right-0 w-24 h-24 bg-emerald-500/10 rounded-full blur-2xl pointer-events-none" />
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold uppercase tracking-wider text-emerald-400 flex items-center space-x-1.5">
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>Mailable (Valid)</span>
+                      </span>
+                      <span className="text-xs font-mono font-bold bg-emerald-950 text-emerald-400 border border-emerald-800/80 px-2 py-0.5 rounded">
+                        {Math.round((reportData.mailable / reportData.total) * 100)}%
+                      </span>
+                    </div>
+                    <div className="text-3xl font-extrabold text-white font-mono">{reportData.mailable}</div>
+                    <p className="text-[11px] text-slate-400">100% safe to send. Verified mailbox with active MX.</p>
+                  </div>
+
+                  {/* Non-Mailable */}
+                  <div
+                    onClick={() => {
+                      setTableFilter(tableFilter === 'non_mailable' && !drilldownSubStatus ? 'all' : 'non_mailable');
+                      setDrilldownSubStatus(null);
+                    }}
+                    className={`bg-slate-900/80 border rounded-2xl p-5 space-y-3 relative overflow-hidden cursor-pointer transition hover:scale-[1.01] ${
+                      tableFilter === 'non_mailable' && !drilldownSubStatus
+                        ? 'border-rose-500 ring-2 ring-rose-500/30'
+                        : 'border-rose-500/30 hover:border-rose-500/70'
+                    }`}
+                  >
+                    <div className="absolute top-0 right-0 w-24 h-24 bg-rose-500/10 rounded-full blur-2xl pointer-events-none" />
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold uppercase tracking-wider text-rose-400 flex items-center space-x-1.5">
+                        <XCircle className="w-4 h-4" />
+                        <span>Non-Mailable</span>
+                      </span>
+                      <span className="text-xs font-mono font-bold bg-rose-950 text-rose-400 border border-rose-800/80 px-2 py-0.5 rounded">
+                        {Math.round((reportData.nonMailable / reportData.total) * 100)}%
+                      </span>
+                    </div>
+                    <div className="text-3xl font-extrabold text-white font-mono">{reportData.nonMailable}</div>
+                    <p className="text-[11px] text-slate-400">Hard bounces avoided. Invalid syntax or dead MX records.</p>
+                  </div>
+
+                  {/* Risky */}
+                  <div
+                    onClick={() => {
+                      setTableFilter(tableFilter === 'risky' && !drilldownSubStatus ? 'all' : 'risky');
+                      setDrilldownSubStatus(null);
+                    }}
+                    className={`bg-slate-900/80 border rounded-2xl p-5 space-y-3 relative overflow-hidden cursor-pointer transition hover:scale-[1.01] ${
+                      tableFilter === 'risky' && !drilldownSubStatus
+                        ? 'border-amber-500 ring-2 ring-amber-500/30'
+                        : 'border-amber-500/30 hover:border-amber-500/70'
+                    }`}
+                  >
+                    <div className="absolute top-0 right-0 w-24 h-24 bg-amber-500/10 rounded-full blur-2xl pointer-events-none" />
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold uppercase tracking-wider text-amber-400 flex items-center space-x-1.5">
+                        <AlertTriangle className="w-4 h-4" />
+                        <span>Risky Emails</span>
+                      </span>
+                      <span className="text-xs font-mono font-bold bg-amber-950 text-amber-400 border border-amber-800/80 px-2 py-0.5 rounded">
+                        {Math.round((reportData.risky / reportData.total) * 100)}%
+                      </span>
+                    </div>
+                    <div className="text-3xl font-extrabold text-white font-mono">{reportData.risky}</div>
+                    <p className="text-[11px] text-slate-400">Catch-all, disposable, role accounts, or greymail.</p>
+                  </div>
+
+                  {/* Unknown */}
+                  <div
+                    onClick={() => {
+                      setTableFilter(tableFilter === 'unknown' && !drilldownSubStatus ? 'all' : 'unknown');
+                      setDrilldownSubStatus(null);
+                    }}
+                    className={`bg-slate-900/80 border rounded-2xl p-5 space-y-3 relative overflow-hidden cursor-pointer transition hover:scale-[1.01] ${
+                      tableFilter === 'unknown' && !drilldownSubStatus
+                        ? 'border-slate-500 ring-2 ring-slate-500/30'
+                        : 'border-slate-700/80 hover:border-slate-600'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center space-x-1.5">
+                        <HelpCircle className="w-4 h-4" />
+                        <span>Unknown</span>
+                      </span>
+                      <span className="text-xs font-mono font-bold bg-slate-800 text-slate-400 border border-slate-700 px-2 py-0.5 rounded">
+                        {Math.round((reportData.unknown / reportData.total) * 100)}%
+                      </span>
+                    </div>
+                    <div className="text-3xl font-extrabold text-white font-mono">{reportData.unknown}</div>
+                    <p className="text-[11px] text-slate-400">Server timeouts. Credits auto-refunded back to balance.</p>
+                  </div>
+                </div>
+
+                {/* Middle Grid: Detailed Risk Breakdown & Provider Matrix */}
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                  {/* Granular Risk Breakdown (8 Cols) */}
+                  <div className="lg:col-span-8 bg-slate-900/60 border border-slate-800 rounded-2xl p-6 space-y-5">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-base font-bold text-white flex items-center space-x-2">
+                        <AlertTriangle className="w-4 h-4 text-amber-400" />
+                        <span>Granular Risk Factors & Threats Detected</span>
+                      </h3>
+                      <span className="text-xs text-slate-400">Protecting Domain Sender Score</span>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      {/* Spam Traps */}
+                      <div
+                        onClick={() => {
+                          setDrilldownSubStatus(drilldownSubStatus === 'spam_trap' ? null : 'spam_trap');
+                          setTableFilter('all');
+                        }}
+                        className={`bg-slate-950/80 border rounded-xl p-3.5 space-y-1 cursor-pointer transition hover:scale-[1.02] ${
+                          drilldownSubStatus === 'spam_trap'
+                            ? 'border-rose-500 ring-2 ring-rose-500/40 bg-rose-950/40'
+                            : 'border-rose-900/60 hover:border-rose-700'
+                        }`}
+                      >
+                        <span className="text-[11px] font-semibold text-rose-400 flex items-center space-x-1">
+                          <Flame className="w-3 h-3" />
+                          <span>Spam Traps</span>
+                        </span>
+                        <div className="text-2xl font-mono font-bold text-white">{reportData.riskBreakdown.spamTraps}</div>
+                        <p className="text-[10px] text-slate-400">Toxic blacklists avoided</p>
+                      </div>
+
+                      {/* Greymail */}
+                      <div
+                        onClick={() => {
+                          setDrilldownSubStatus(drilldownSubStatus === 'greymail' ? null : 'greymail');
+                          setTableFilter('all');
+                        }}
+                        className={`bg-slate-950/80 border rounded-xl p-3.5 space-y-1 cursor-pointer transition hover:scale-[1.02] ${
+                          drilldownSubStatus === 'greymail'
+                            ? 'border-amber-500 ring-2 ring-amber-500/40 bg-amber-950/40'
+                            : 'border-amber-900/60 hover:border-amber-700'
+                        }`}
+                      >
+                        <span className="text-[11px] font-semibold text-amber-400 flex items-center space-x-1">
+                          <Info className="w-3 h-3" />
+                          <span>Greymail</span>
+                        </span>
+                        <div className="text-2xl font-mono font-bold text-white">{reportData.riskBreakdown.greymail}</div>
+                        <p className="text-[10px] text-slate-400">Low engagement lists</p>
+                      </div>
+
+                      {/* Disposable */}
+                      <div
+                        onClick={() => {
+                          setDrilldownSubStatus(drilldownSubStatus === 'disposable' ? null : 'disposable');
+                          setTableFilter('all');
+                        }}
+                        className={`bg-slate-950/80 border rounded-xl p-3.5 space-y-1 cursor-pointer transition hover:scale-[1.02] ${
+                          drilldownSubStatus === 'disposable'
+                            ? 'border-slate-400 ring-2 ring-slate-400/40 bg-slate-900'
+                            : 'border-slate-800 hover:border-slate-700'
+                        }`}
+                      >
+                        <span className="text-[11px] font-semibold text-slate-300 flex items-center space-x-1">
+                          <Trash2 className="w-3 h-3" />
+                          <span>Disposable</span>
+                        </span>
+                        <div className="text-2xl font-mono font-bold text-white">{reportData.riskBreakdown.disposable}</div>
+                        <p className="text-[10px] text-slate-400">Temporary burners</p>
+                      </div>
+
+                      {/* Catch-All */}
+                      <div
+                        onClick={() => {
+                          setDrilldownSubStatus(drilldownSubStatus === 'catch_all' ? null : 'catch_all');
+                          setTableFilter('all');
+                        }}
+                        className={`bg-slate-950/80 border rounded-xl p-3.5 space-y-1 cursor-pointer transition hover:scale-[1.02] ${
+                          drilldownSubStatus === 'catch_all'
+                            ? 'border-blue-500 ring-2 ring-blue-500/40 bg-blue-950/40'
+                            : 'border-slate-800 hover:border-slate-700'
+                        }`}
+                      >
+                        <span className="text-[11px] font-semibold text-slate-300 flex items-center space-x-1">
+                          <Layers className="w-3 h-3" />
+                          <span>Catch-All</span>
+                        </span>
+                        <div className="text-2xl font-mono font-bold text-white">{reportData.riskBreakdown.catchAll}</div>
+                        <p className="text-[10px] text-slate-400">Accept-all servers</p>
+                      </div>
+
+                      {/* Role Accounts */}
+                      <div
+                        onClick={() => {
+                          setDrilldownSubStatus(drilldownSubStatus === 'role_based' ? null : 'role_based');
+                          setTableFilter('all');
+                        }}
+                        className={`bg-slate-950/80 border rounded-xl p-3.5 space-y-1 cursor-pointer transition hover:scale-[1.02] ${
+                          drilldownSubStatus === 'role_based'
+                            ? 'border-purple-500 ring-2 ring-purple-500/40 bg-purple-950/40'
+                            : 'border-slate-800 hover:border-slate-700'
+                        }`}
+                      >
+                        <span className="text-[11px] font-semibold text-slate-300">Role-Based</span>
+                        <div className="text-2xl font-mono font-bold text-white">{reportData.riskBreakdown.roleBased}</div>
+                        <p className="text-[10px] text-slate-400">admin@, support@, info@</p>
+                      </div>
+
+                      {/* Typo suggestions */}
+                      <div
+                        onClick={() => {
+                          setDrilldownSubStatus(drilldownSubStatus === 'typo' ? null : 'typo');
+                          setTableFilter('all');
+                        }}
+                        className={`bg-slate-950/80 border rounded-xl p-3.5 space-y-1 cursor-pointer transition hover:scale-[1.02] ${
+                          drilldownSubStatus === 'typo'
+                            ? 'border-emerald-500 ring-2 ring-emerald-500/40 bg-emerald-950/40'
+                            : 'border-emerald-900/60 hover:border-emerald-700'
+                        }`}
+                      >
+                        <span className="text-[11px] font-semibold text-emerald-400">Typos Fixed</span>
+                        <div className="text-2xl font-mono font-bold text-white">{reportData.riskBreakdown.typos}</div>
+                        <p className="text-[10px] text-slate-400">e.g. gamil → gmail</p>
+                      </div>
+
+                      {/* Missing MX */}
+                      <div
+                        onClick={() => {
+                          setDrilldownSubStatus(drilldownSubStatus === 'no_mx' ? null : 'no_mx');
+                          setTableFilter('all');
+                        }}
+                        className={`bg-slate-950/80 border rounded-xl p-3.5 space-y-1 cursor-pointer transition hover:scale-[1.02] ${
+                          drilldownSubStatus === 'no_mx'
+                            ? 'border-rose-500 ring-2 ring-rose-500/40 bg-rose-950/40'
+                            : 'border-slate-800 hover:border-slate-700'
+                        }`}
+                      >
+                        <span className="text-[11px] font-semibold text-slate-300">Missing MX</span>
+                        <div className="text-2xl font-mono font-bold text-white">{reportData.riskBreakdown.missingMx}</div>
+                        <p className="text-[10px] text-slate-400">No mail exchanger</p>
+                      </div>
+
+                      {/* Syntax errors */}
+                      <div
+                        onClick={() => {
+                          setDrilldownSubStatus(drilldownSubStatus === 'invalid_syntax' ? null : 'invalid_syntax');
+                          setTableFilter('all');
+                        }}
+                        className={`bg-slate-950/80 border rounded-xl p-3.5 space-y-1 cursor-pointer transition hover:scale-[1.02] ${
+                          drilldownSubStatus === 'invalid_syntax'
+                            ? 'border-rose-500 ring-2 ring-rose-500/40 bg-rose-950/40'
+                            : 'border-slate-800 hover:border-slate-700'
+                        }`}
+                      >
+                        <span className="text-[11px] font-semibold text-slate-300">Syntax Errors</span>
+                        <div className="text-2xl font-mono font-bold text-white">{reportData.riskBreakdown.syntaxErrors}</div>
+                        <p className="text-[10px] text-slate-400">RFC 5322 noncompliant</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Mailbox Provider Composition (4 Cols) */}
+                  <div className="lg:col-span-4 bg-slate-900/60 border border-slate-800 rounded-2xl p-6 space-y-5">
+                    <h3 className="text-base font-bold text-white flex items-center space-x-2">
+                      <Server className="w-4 h-4 text-emerald-400" />
+                      <span>Provider Distribution</span>
+                    </h3>
+
+                    <div className="space-y-3">
+                      <div>
+                        <div className="flex justify-between text-xs mb-1">
+                          <span className="text-slate-300">Google Workspace / Gmail</span>
+                          <span className="font-mono text-emerald-400">{reportData.providerBreakdown.google}</span>
+                        </div>
+                        <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
+                          <div
+                            className="bg-emerald-500 h-full rounded-full"
+                            style={{ width: `${(reportData.providerBreakdown.google / reportData.total) * 100}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-xs mb-1">
+                          <span className="text-slate-300">Microsoft 365 / Outlook</span>
+                          <span className="font-mono text-blue-400">{reportData.providerBreakdown.microsoft}</span>
+                        </div>
+                        <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
+                          <div
+                            className="bg-blue-500 h-full rounded-full"
+                            style={{ width: `${(reportData.providerBreakdown.microsoft / reportData.total) * 100}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-xs mb-1">
+                          <span className="text-slate-300">Corporate Custom B2B</span>
+                          <span className="font-mono text-purple-400">{reportData.providerBreakdown.corporateB2B}</span>
+                        </div>
+                        <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
+                          <div
+                            className="bg-purple-500 h-full rounded-full"
+                            style={{ width: `${(reportData.providerBreakdown.corporateB2B / reportData.total) * 100}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-xs mb-1">
+                          <span className="text-slate-300">Yahoo & Other Free</span>
+                          <span className="font-mono text-amber-400">
+                            {reportData.providerBreakdown.yahoo + reportData.providerBreakdown.otherFree}
+                          </span>
+                        </div>
+                        <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
+                          <div
+                            className="bg-amber-500 h-full rounded-full"
+                            style={{
+                              width: `${((reportData.providerBreakdown.yahoo + reportData.providerBreakdown.otherFree) / reportData.total) * 100}%`,
+                            }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="bg-slate-950/70 border border-slate-800/80 rounded-xl p-3 text-[11px] text-slate-400">
+                      💡 <strong>ESP Deliverability Tip:</strong> Maintain a 0.3% maximum bounce rate to adhere to Google & Yahoo's 2024+ sender authentication policies.
+                    </div>
+                  </div>
+                </div>
+
+                {/* Filterable Data Table */}
+                <div className="bg-slate-900/60 border border-slate-800 rounded-2xl overflow-hidden space-y-4 p-5">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    {/* Filter buttons */}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <button
+                        onClick={() => {
+                          setTableFilter('all');
+                          setDrilldownSubStatus(null);
+                        }}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+                          tableFilter === 'all' && !drilldownSubStatus
+                            ? 'bg-slate-700 text-white'
+                            : 'text-slate-400 hover:text-white bg-slate-800/50'
+                        }`}
+                      >
+                        All ({reportData.total})
+                      </button>
+                      <button
+                        onClick={() => {
+                          setTableFilter('mailable');
+                          setDrilldownSubStatus(null);
+                        }}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+                          tableFilter === 'mailable' && !drilldownSubStatus
+                            ? 'bg-emerald-600 text-white'
+                            : 'text-emerald-400 hover:bg-emerald-950/50'
+                        }`}
+                      >
+                        Mailable ({reportData.mailable})
+                      </button>
+                      <button
+                        onClick={() => {
+                          setTableFilter('non_mailable');
+                          setDrilldownSubStatus(null);
+                        }}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+                          tableFilter === 'non_mailable' && !drilldownSubStatus
+                            ? 'bg-rose-600 text-white'
+                            : 'text-rose-400 hover:bg-rose-950/50'
+                        }`}
+                      >
+                        Non-Mailable ({reportData.nonMailable})
+                      </button>
+                      <button
+                        onClick={() => {
+                          setTableFilter('risky');
+                          setDrilldownSubStatus(null);
+                        }}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+                          tableFilter === 'risky' && !drilldownSubStatus
+                            ? 'bg-amber-600 text-white'
+                            : 'text-amber-400 hover:bg-amber-950/50'
+                        }`}
+                      >
+                        Risky ({reportData.risky})
+                      </button>
+                      <button
+                        onClick={() => {
+                          setTableFilter('unknown');
+                          setDrilldownSubStatus(null);
+                        }}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+                          tableFilter === 'unknown' && !drilldownSubStatus
+                            ? 'bg-slate-600 text-white'
+                            : 'text-slate-400 hover:bg-slate-800/50'
+                        }`}
+                      >
+                        Unknown ({reportData.unknown})
+                      </button>
+
+                      {drilldownSubStatus && (
+                        <span className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-emerald-950 text-emerald-300 border border-emerald-700">
+                          <span>Risk Filter: <strong>{drilldownSubStatus.replace(/_/g, ' ')}</strong></span>
+                          <button
+                            onClick={() => setDrilldownSubStatus(null)}
+                            className="text-emerald-400 hover:text-white ml-1 font-bold"
+                          >
+                            ✕
+                          </button>
+                        </span>
+                      )}
+
+                      {(tableFilter !== 'all' || drilldownSubStatus || searchQuery.trim()) && (
+                        <button
+                          onClick={() => {
+                            setTableFilter('all');
+                            setDrilldownSubStatus(null);
+                            setSearchQuery('');
+                          }}
+                          className="px-2.5 py-1 text-xs text-slate-400 hover:text-rose-400 border border-slate-800 hover:border-rose-800/60 rounded-lg transition"
+                        >
+                          Clear All Filters
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Search box */}
+                    <div className="relative min-w-[240px]">
+                      <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
+                      <input
+                        type="text"
+                        placeholder="Search email or domain..."
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        className="w-full pl-9 pr-3 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200 focus:outline-none focus:border-emerald-500"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Table */}
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-950/80 text-slate-400 border-b border-slate-800 uppercase tracking-wider text-[10px]">
+                        <tr>
+                          <th className="py-3 px-4">Email Address</th>
+                          <th className="py-3 px-4">Primary Status</th>
+                          <th className="py-3 px-4">Sub-Status</th>
+                          <th className="py-3 px-4">Score</th>
+                          <th className="py-3 px-4">MX Record</th>
+                          <th className="py-3 px-4">Risk Flags</th>
+                          <th className="py-3 px-4 text-right">Inspect</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/60 font-mono text-[11px]">
+                        {filteredResults.map((item, idx) => (
+                          <tr
+                            key={idx}
+                            onClick={() => setSelectedEmailDetail(item)}
+                            className="hover:bg-slate-800/60 transition cursor-pointer group"
+                          >
+                            <td className="py-3 px-4 font-semibold text-slate-200 group-hover:text-emerald-300">
+                              {item.email}
+                              {item.details.didYouMean && (
+                                <span className="block text-[10px] text-emerald-400 font-sans mt-0.5">
+                                  💡 Did you mean: <strong>{item.details.didYouMean}</strong>?
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3 px-4">
+                              <span
+                                className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                                  item.status === 'mailable'
+                                    ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                                    : item.status === 'non_mailable'
+                                    ? 'bg-rose-950 text-rose-400 border border-rose-800'
+                                    : item.status === 'risky'
+                                    ? 'bg-amber-950 text-amber-400 border border-amber-800'
+                                    : 'bg-slate-800 text-slate-400 border border-slate-700'
+                                }`}
+                              >
+                                {item.status}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 text-slate-300 font-sans">
+                              {item.subStatus.replace(/_/g, ' ')}
+                            </td>
+                            <td className="py-3 px-4 font-bold">
+                              <span
+                                className={
+                                  item.qualityScore >= 80
+                                    ? 'text-emerald-400'
+                                    : item.qualityScore >= 50
+                                    ? 'text-amber-400'
+                                    : 'text-rose-400'
+                                }
+                              >
+                                {item.qualityScore}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 text-slate-400 truncate max-w-[160px]">
+                              {item.details.mxRecords[0] || 'None'}
+                            </td>
+                            <td className="py-3 px-4">
+                              <div className="flex flex-wrap gap-1 font-sans">
+                                {item.details.isSpamTrap && (
+                                  <span className="bg-rose-950 text-rose-400 border border-rose-800 px-1.5 py-0.2 rounded text-[9px]">
+                                    Spam Trap
+                                  </span>
+                                )}
+                                {item.details.isGreymail && (
+                                  <span className="bg-amber-950 text-amber-400 border border-amber-800 px-1.5 py-0.2 rounded text-[9px]">
+                                    Greymail
+                                  </span>
+                                )}
+                                {item.details.isDisposable && (
+                                  <span className="bg-slate-800 text-slate-300 px-1.5 py-0.2 rounded text-[9px]">
+                                    Disposable
+                                  </span>
+                                )}
+                                {item.details.isRoleBased && (
+                                  <span className="bg-purple-950 text-purple-300 px-1.5 py-0.2 rounded text-[9px]">
+                                    Role
+                                  </span>
+                                )}
+                                {item.details.isCatchAll && (
+                                  <span className="bg-blue-950 text-blue-300 px-1.5 py-0.2 rounded text-[9px]">
+                                    Catch-All
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                            <td className="py-3 px-4 text-right">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedEmailDetail(item);
+                                }}
+                                className="px-2.5 py-1 text-[11px] bg-slate-800 hover:bg-emerald-600 hover:text-white text-slate-300 rounded font-sans transition"
+                              >
+                                View
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 3. DELIVERABILITY INTELLIGENCE & SENDER REPUTATION */}
+        {activeTab === 'deliverability' && (
           <div className="max-w-4xl mx-auto space-y-8">
             <div className="text-center space-y-2">
               <span className="text-xs font-bold text-amber-400 uppercase tracking-widest bg-amber-950/80 border border-amber-800 px-3 py-1 rounded-full">
@@ -1722,8 +2259,8 @@ export default function TruthMailDashboard() {
           </div>
         )}
 
-        {/* 5. SUBSCRIPTION TIERS & PRICING */}
-        {activeTab === 'pricing' && (
+        {/* 5. SETTINGS & BILLING WORKSPACE */}
+        {activeTab === 'billing' && (
           <div className="max-w-6xl mx-auto space-y-12">
             <div className="text-center space-y-3">
               <span className="text-xs font-bold text-emerald-400 uppercase tracking-widest bg-emerald-950 border border-emerald-800 px-3 py-1 rounded-full">
@@ -2058,107 +2595,11 @@ export default function TruthMailDashboard() {
         )}
       </main>
 
-      {/* INSPECT EMAIL DETAIL MODAL */}
-      {selectedEmailDetail && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-xl w-full p-6 space-y-6 shadow-2xl relative">
-            <div className="flex items-start justify-between">
-              <div>
-                <span className="text-[11px] text-slate-400 uppercase font-semibold">Audit Record</span>
-                <h3 className="text-lg font-bold text-white font-mono">{selectedEmailDetail.email}</h3>
-              </div>
-              <button
-                onClick={() => setSelectedEmailDetail(null)}
-                className="text-slate-400 hover:text-white p-1 rounded-lg"
-              >
-                ✕
-              </button>
-            </div>
-
-            <div className="space-y-4">
-              <div className="flex items-center justify-between bg-slate-950 p-3.5 rounded-xl border border-slate-800">
-                <span className="text-xs text-slate-400">Primary Classification:</span>
-                <span
-                  className={`px-2.5 py-1 rounded-full text-xs font-bold uppercase ${
-                    selectedEmailDetail.status === 'mailable'
-                      ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
-                      : selectedEmailDetail.status === 'non_mailable'
-                      ? 'bg-rose-950 text-rose-400 border border-rose-800'
-                      : 'bg-amber-950 text-amber-400 border border-amber-800'
-                  }`}
-                >
-                  {selectedEmailDetail.status}
-                </span>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3 text-xs">
-                <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 space-y-0.5">
-                  <span className="text-slate-400 text-[10px] uppercase">Deliverability Score</span>
-                  <div className="font-mono font-bold text-base text-white">{selectedEmailDetail.qualityScore}/100</div>
-                </div>
-                <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 space-y-0.5">
-                  <span className="text-slate-400 text-[10px] uppercase">SMTP Response Code</span>
-                  <div className="font-mono font-bold text-base text-emerald-400">{selectedEmailDetail.details.smtpCode}</div>
-                </div>
-              </div>
-
-              <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800 space-y-2 text-xs">
-                <span className="text-slate-400 text-[10px] uppercase font-semibold block">DNS MX Host</span>
-                <p className="font-mono text-slate-200 text-xs">
-                  {selectedEmailDetail.details.mxRecords.join(', ') || 'No active MX host records found'}
-                </p>
-              </div>
-
-              <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800 space-y-2 text-xs">
-                <span className="text-slate-400 text-[10px] uppercase font-semibold block">Raw SMTP Response</span>
-                <p className="font-mono text-slate-300 text-[11px]">
-                  {selectedEmailDetail.details.smtpMessage}
-                </p>
-              </div>
-
-              {/* Free Live SPF & DMARC Security Authentication Inspection */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 space-y-1">
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-400 text-[10px] uppercase font-semibold">SPF Authentication</span>
-                    <span className="text-[10px] font-bold text-emerald-400 bg-emerald-950 px-1.5 py-0.5 rounded border border-emerald-800">
-                      {selectedEmailDetail.details.spfFound ? '✓ Valid SPF' : 'Missing'}
-                    </span>
-                  </div>
-                  <p className="font-mono text-[10px] text-slate-300 truncate" title={selectedEmailDetail.details.spfRecord || ''}>
-                    {selectedEmailDetail.details.spfRecord || 'No SPF record found'}
-                  </p>
-                </div>
-
-                <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 space-y-1">
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-400 text-[10px] uppercase font-semibold">DMARC Security Policy</span>
-                    <span className="text-[10px] font-bold text-emerald-400 bg-emerald-950 px-1.5 py-0.5 rounded border border-emerald-800">
-                      {selectedEmailDetail.details.dmarcFound ? '✓ DMARC Protected' : 'Missing'}
-                    </span>
-                  </div>
-                  <p className="font-mono text-[10px] text-slate-300 truncate" title={selectedEmailDetail.details.dmarcRecord || ''}>
-                    {selectedEmailDetail.details.dmarcRecord || 'No DMARC policy found'}
-                  </p>
-                </div>
-              </div>
-
-              {selectedEmailDetail.details.didYouMean && (
-                <div className="bg-emerald-950/70 border border-emerald-800 p-3 rounded-xl text-xs text-emerald-300">
-                  💡 Typo Detected: Suggested domain correction is <strong>{selectedEmailDetail.details.didYouMean}</strong>
-                </div>
-              )}
-            </div>
-
-            <button
-              onClick={() => setSelectedEmailDetail(null)}
-              className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-semibold transition"
-            >
-              Close Audit Modal
-            </button>
-          </div>
-        </div>
-      )}
+      {/* RICH TECHNICAL EVIDENCE SLIDE-OVER DRAWER */}
+      <EvidenceDrawer
+        lead={selectedEmailDetail}
+        onClose={() => setSelectedEmailDetail(null)}
+      />
 
       {/* TOP UP CREDITS MODAL */}
       {topUpModalOpen && (
