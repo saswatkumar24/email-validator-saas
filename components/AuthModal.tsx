@@ -184,23 +184,23 @@ export default function AuthModal({ isOpen, onClose, onSuccess, initialMode = 'l
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-6 sm:p-8 relative shadow-2xl space-y-6">
+    <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4">
+      <div className="bg-white border border-slate-200 rounded-3xl max-w-md w-full p-6 sm:p-8 relative shadow-2xl space-y-6 text-slate-900">
         <button
           onClick={onClose}
-          className="absolute right-5 top-5 text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition"
+          className="absolute right-5 top-5 text-slate-400 hover:text-slate-700 p-1.5 rounded-lg hover:bg-slate-100 transition"
         >
           <X className="w-5 h-5" />
         </button>
 
         {/* Modal Header */}
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-400 flex items-center justify-center shadow-lg shadow-emerald-500/20">
-            <ShieldCheck className="w-6 h-6 text-slate-950 stroke-[2.5]" />
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-500 flex items-center justify-center shadow-md shadow-emerald-600/20">
+            <ShieldCheck className="w-6 h-6 text-white stroke-[2.5]" />
           </div>
           <div>
-            <h2 className="text-xl font-black text-white">TruthMail</h2>
-            <p className="text-xs text-slate-400">
+            <h2 className="text-xl font-black text-slate-900">TruthMail</h2>
+            <p className="text-xs text-slate-500">
               {mode === 'login' && 'Sign in to access your validation dashboard'}
               {mode === 'signup' && 'Create your account & get 500 free credits'}
               {mode === 'otp' && 'Enter 6-digit email verification code'}
@@ -211,14 +211,14 @@ export default function AuthModal({ isOpen, onClose, onSuccess, initialMode = 'l
         </div>
 
         {error && (
-          <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 shrink-0" /> {error}
+          <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" /> {error}
           </div>
         )}
 
         {message && (
-          <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 shrink-0" /> {message}
+          <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" /> {message}
           </div>
         )}
 
@@ -226,23 +226,23 @@ export default function AuthModal({ isOpen, onClose, onSuccess, initialMode = 'l
         {mode === 'login' && (
           <form onSubmit={handleLogin} className="space-y-4">
             <div>
-              <label className="text-xs font-semibold text-slate-300 block mb-1.5">Email Address</label>
+              <label className="text-xs font-semibold text-slate-700 block mb-1.5">Email Address</label>
               <div className="relative">
-                <Mail className="w-4 h-4 absolute left-3 top-3 text-slate-500" />
+                <Mail className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
                 <input
                   type="email"
                   required
                   placeholder="name@company.com"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  className="w-full pl-9 pr-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white focus:outline-none focus:border-emerald-500"
+                  className="w-full pl-9 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition"
                 />
               </div>
             </div>
 
             <div>
               <div className="flex items-center justify-between mb-1.5">
-                <label className="text-xs font-semibold text-slate-300">Password</label>
+                <label className="text-xs font-semibold text-slate-700">Password</label>
                 <button
                   type="button"
                   onClick={() => {
@@ -250,20 +250,20 @@ export default function AuthModal({ isOpen, onClose, onSuccess, initialMode = 'l
                     setMessage(null);
                     setMode('forgot');
                   }}
-                  className="text-xs text-emerald-400 hover:text-emerald-300"
+                  className="text-xs font-semibold text-emerald-600 hover:text-emerald-700"
                 >
                   Forgot password?
                 </button>
               </div>
               <div className="relative">
-                <Lock className="w-4 h-4 absolute left-3 top-3 text-slate-500" />
+                <Lock className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
                 <input
                   type="password"
                   required
                   placeholder="••••••••"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="w-full pl-9 pr-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white focus:outline-none focus:border-emerald-500"
+                  className="w-full pl-9 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition"
                 />
               </div>
             </div>
@@ -271,7 +271,7 @@ export default function AuthModal({ isOpen, onClose, onSuccess, initialMode = 'l
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm rounded-xl transition shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-2"
+              className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm rounded-xl transition shadow-md shadow-emerald-600/20 flex items-center justify-center gap-2"
             >
               {loading ? 'Signing in...' : 'Sign In to Dashboard'}
               <ArrowRight className="w-4 h-4" />
@@ -279,17 +279,17 @@ export default function AuthModal({ isOpen, onClose, onSuccess, initialMode = 'l
 
             <div className="relative my-4">
               <div className="absolute inset-0 flex items-center">
-                <div className="w-full border-t border-slate-800"></div>
+                <div className="w-full border-t border-slate-200"></div>
               </div>
               <div className="relative flex justify-center text-xs uppercase">
-                <span className="bg-slate-900 px-2 text-slate-500">Or continue with</span>
+                <span className="bg-white px-3 text-slate-400 font-semibold tracking-wider">Or continue with</span>
               </div>
             </div>
 
             <button
               type="button"
               onClick={handleGoogleSignIn}
-              className="w-full py-2.5 bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-200 text-sm font-semibold rounded-xl transition flex items-center justify-center gap-2"
+              className="w-full py-2.5 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-sm font-semibold rounded-xl transition flex items-center justify-center gap-2 shadow-xs"
             >
               <svg className="w-4 h-4" viewBox="0 0 24 24">
                 <path
@@ -312,7 +312,7 @@ export default function AuthModal({ isOpen, onClose, onSuccess, initialMode = 'l
               Sign in with Google
             </button>
 
-            <div className="text-center text-xs text-slate-400 pt-2">
+            <div className="text-center text-xs text-slate-500 pt-2">
               Don't have an account?{' '}
               <button
                 type="button"
@@ -321,7 +321,7 @@ export default function AuthModal({ isOpen, onClose, onSuccess, initialMode = 'l
                   setMessage(null);
                   setMode('signup');
                 }}
-                className="text-emerald-400 font-bold hover:underline"
+                className="text-emerald-600 font-bold hover:underline"
               >
                 Sign Up (+500 Credits)
               </button>
@@ -333,59 +333,59 @@ export default function AuthModal({ isOpen, onClose, onSuccess, initialMode = 'l
         {mode === 'signup' && (
           <form onSubmit={handleSignup} className="space-y-4">
             <div>
-              <label className="text-xs font-semibold text-slate-300 block mb-1.5">Full Name</label>
+              <label className="text-xs font-semibold text-slate-700 block mb-1.5">Full Name</label>
               <div className="relative">
-                <User className="w-4 h-4 absolute left-3 top-3 text-slate-500" />
+                <User className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
                 <input
                   type="text"
                   required
                   placeholder="Saswat Patro"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  className="w-full pl-9 pr-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white focus:outline-none focus:border-emerald-500"
+                  className="w-full pl-9 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition"
                 />
               </div>
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-slate-300 block mb-1.5">Email Address</label>
+              <label className="text-xs font-semibold text-slate-700 block mb-1.5">Email Address</label>
               <div className="relative">
-                <Mail className="w-4 h-4 absolute left-3 top-3 text-slate-500" />
+                <Mail className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
                 <input
                   type="email"
                   required
                   placeholder="name@company.com"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  className="w-full pl-9 pr-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white focus:outline-none focus:border-emerald-500"
+                  className="w-full pl-9 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition"
                 />
               </div>
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-slate-300 block mb-1.5">Create Password</label>
+              <label className="text-xs font-semibold text-slate-700 block mb-1.5">Create Password</label>
               <div className="relative">
-                <Lock className="w-4 h-4 absolute left-3 top-3 text-slate-500" />
+                <Lock className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
                 <input
                   type="password"
                   required
                   placeholder="At least 6 characters"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="w-full pl-9 pr-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white focus:outline-none focus:border-emerald-500"
+                  className="w-full pl-9 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition"
                 />
               </div>
             </div>
 
-            <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl flex items-center gap-2 text-xs text-emerald-400">
-              <Sparkles className="w-4 h-4 shrink-0 text-emerald-400" />
+            <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center gap-2 text-xs text-emerald-800">
+              <Sparkles className="w-4 h-4 shrink-0 text-emerald-600" />
               <span>Includes 500 free email validation credits upon verification!</span>
             </div>
 
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm rounded-xl transition shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-2"
+              className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm rounded-xl transition shadow-md shadow-emerald-600/20 flex items-center justify-center gap-2"
             >
               {loading ? 'Creating account...' : 'Create Account & Get Code'}
               <ArrowRight className="w-4 h-4" />
@@ -394,12 +394,12 @@ export default function AuthModal({ isOpen, onClose, onSuccess, initialMode = 'l
             <button
               type="button"
               onClick={handleGoogleSignIn}
-              className="w-full py-2.5 bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-200 text-sm font-semibold rounded-xl transition flex items-center justify-center gap-2"
+              className="w-full py-2.5 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-sm font-semibold rounded-xl transition flex items-center justify-center gap-2 shadow-xs"
             >
               Sign up with Google
             </button>
 
-            <div className="text-center text-xs text-slate-400 pt-2">
+            <div className="text-center text-xs text-slate-500 pt-2">
               Already have an account?{' '}
               <button
                 type="button"
@@ -408,7 +408,7 @@ export default function AuthModal({ isOpen, onClose, onSuccess, initialMode = 'l
                   setMessage(null);
                   setMode('login');
                 }}
-                className="text-emerald-400 font-bold hover:underline"
+                className="text-emerald-600 font-bold hover:underline"
               >
                 Sign In
               </button>
@@ -420,9 +420,9 @@ export default function AuthModal({ isOpen, onClose, onSuccess, initialMode = 'l
         {mode === 'otp' && (
           <form onSubmit={handleVerifyOtp} className="space-y-4">
             <div className="text-center space-y-1">
-              <KeyRound className="w-10 h-10 text-emerald-400 mx-auto" />
-              <div className="text-sm font-bold text-white">Enter 6-Digit Code</div>
-              <div className="text-xs text-slate-400">Sent to {email}</div>
+              <KeyRound className="w-10 h-10 text-emerald-600 mx-auto" />
+              <div className="text-sm font-bold text-slate-900">Enter 6-Digit Code</div>
+              <div className="text-xs text-slate-500">Sent to {email}</div>
             </div>
 
             <div>
@@ -433,24 +433,24 @@ export default function AuthModal({ isOpen, onClose, onSuccess, initialMode = 'l
                 placeholder="123456"
                 value={otp}
                 onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
-                className="w-full text-center text-2xl tracking-[12px] font-mono py-3 bg-slate-950 border border-slate-800 rounded-xl text-emerald-400 focus:outline-none focus:border-emerald-500 font-bold"
+                className="w-full text-center text-2xl tracking-[12px] font-mono py-3 bg-slate-50 border border-slate-200 rounded-xl text-emerald-600 focus:bg-white focus:outline-none focus:border-emerald-500 font-bold"
               />
             </div>
 
             <button
               type="submit"
               disabled={loading || otp.length < 6}
-              className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-sm rounded-xl transition shadow-lg shadow-emerald-600/20"
+              className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-sm rounded-xl transition shadow-md shadow-emerald-600/20"
             >
               {loading ? 'Verifying...' : 'Verify & Activate Account'}
             </button>
 
-            <div className="text-center text-xs text-slate-400">
+            <div className="text-center text-xs text-slate-500">
               Didn't receive the code?{' '}
               <button
                 type="button"
                 onClick={handleSignup}
-                className="text-emerald-400 font-bold hover:underline"
+                className="text-emerald-600 font-bold hover:underline"
               >
                 Resend Code
               </button>
@@ -462,16 +462,16 @@ export default function AuthModal({ isOpen, onClose, onSuccess, initialMode = 'l
         {mode === 'forgot' && (
           <form onSubmit={handleForgotPassword} className="space-y-4">
             <div>
-              <label className="text-xs font-semibold text-slate-300 block mb-1.5">Account Email</label>
+              <label className="text-xs font-semibold text-slate-700 block mb-1.5">Account Email</label>
               <div className="relative">
-                <Mail className="w-4 h-4 absolute left-3 top-3 text-slate-500" />
+                <Mail className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
                 <input
                   type="email"
                   required
                   placeholder="name@company.com"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  className="w-full pl-9 pr-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white focus:outline-none focus:border-emerald-500"
+                  className="w-full pl-9 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition"
                 />
               </div>
             </div>
@@ -479,17 +479,17 @@ export default function AuthModal({ isOpen, onClose, onSuccess, initialMode = 'l
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm rounded-xl transition shadow-lg shadow-emerald-600/20"
+              className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm rounded-xl transition shadow-md shadow-emerald-600/20"
             >
               {loading ? 'Sending code...' : 'Send Password Reset Code'}
             </button>
 
-            <div className="text-center text-xs text-slate-400">
+            <div className="text-center text-xs text-slate-500">
               Remember your password?{' '}
               <button
                 type="button"
                 onClick={() => setMode('login')}
-                className="text-emerald-400 font-bold hover:underline"
+                className="text-emerald-600 font-bold hover:underline"
               >
                 Back to Sign In
               </button>
@@ -501,7 +501,7 @@ export default function AuthModal({ isOpen, onClose, onSuccess, initialMode = 'l
         {mode === 'reset' && (
           <form onSubmit={handleResetPassword} className="space-y-4">
             <div>
-              <label className="text-xs font-semibold text-slate-300 block mb-1.5">6-Digit Reset Code</label>
+              <label className="text-xs font-semibold text-slate-700 block mb-1.5">6-Digit Reset Code</label>
               <input
                 type="text"
                 required
@@ -509,26 +509,26 @@ export default function AuthModal({ isOpen, onClose, onSuccess, initialMode = 'l
                 placeholder="123456"
                 value={otp}
                 onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
-                className="w-full text-center text-xl tracking-[8px] font-mono py-2 bg-slate-950 border border-slate-800 rounded-xl text-emerald-400 focus:outline-none focus:border-emerald-500 font-bold"
+                className="w-full text-center text-xl tracking-[8px] font-mono py-2 bg-slate-50 border border-slate-200 rounded-xl text-emerald-600 focus:bg-white focus:outline-none focus:border-emerald-500 font-bold"
               />
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-slate-300 block mb-1.5">New Password</label>
+              <label className="text-xs font-semibold text-slate-700 block mb-1.5">New Password</label>
               <input
                 type="password"
                 required
                 placeholder="At least 6 characters"
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
-                className="w-full px-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white focus:outline-none focus:border-emerald-500"
+                className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:border-emerald-500 transition"
               />
             </div>
 
             <button
               type="submit"
               disabled={loading || otp.length < 6}
-              className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-sm rounded-xl transition shadow-lg shadow-emerald-600/20"
+              className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-sm rounded-xl transition shadow-md shadow-emerald-600/20"
             >
               {loading ? 'Updating password...' : 'Set New Password & Log In'}
             </button>
